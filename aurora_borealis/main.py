@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .config import load_config, save_config
@@ -128,6 +129,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Aurora Borealis")
+    icon_path = Path(__file__).resolve().parent / "assets" / "aurora-borealis.svg"
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     win = MainWindow(
         repo=repo,

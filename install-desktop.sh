@@ -9,8 +9,9 @@ cat > "${APPS_DIR}/aurora-borealis.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Aurora Borealis
-Comment=Native Linux D&D 5e Character Builder
+Comment=Native Linux D&D 5e / 5.5e Character Builder
 Exec="${SCRIPT_DIR}/aurora-borealis" %f
+Icon=${SCRIPT_DIR}/aurora_borealis/assets/aurora-borealis.svg
 Terminal=false
 Categories=Game;RolePlaying;
 MimeType=application/x-dnd5e;

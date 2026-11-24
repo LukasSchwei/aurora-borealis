@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="14" y1="6" x2="114" y2="122" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1e2026"/>
+      <stop offset="100%" stop-color="#0e0f12"/>
+    </linearGradient>
+    <linearGradient id="ribbon1" x1="16" y1="94" x2="112" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="50%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="ribbon2" x1="20" y1="76" x2="108" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399" stop-opacity="0.45"/>
+      <stop offset="50%" stop-color="#38bdf8" stop-opacity="0.82"/>
+      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0.55"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="6" y="6" width="116" height="116" rx="30"/>
+    </clipPath>
+  </defs>
+
+  <!-- Plump Squircle Tile -->
+  <rect x="6" y="6" width="116" height="116" rx="30" fill="url(#bg)" stroke="#323640" stroke-width="3.5"/>
+
+  <g clip-path="url(#tile)">
+    <!-- Soft chubby d20 hexagon crest -->
+    <polygon points="64,20 102,42 102,86 64,108 26,86 26,42"
+             fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3.5" stroke-linejoin="round"/>
+
+    <!-- Plump background aurora curtain -->
+    <path d="M 10 86 C 34 42, 56 96, 82 52 C 94 30, 108 34, 122 44 L 122 78 C 104 68, 94 66, 80 88 C 56 120, 34 76, 10 110 Z"
+          fill="url(#ribbon2)"/>
+
+    <!-- Chubby primary aurora wave -->
+    <path d="M 12 88 C 35 40, 58 94, 84 48 C 95 28, 106 31, 118 38"
+          fill="none" stroke="url(#ribbon1)" stroke-width="16" stroke-linecap="round"/>
+
+    <!-- Soft inner sheen -->
+    <path d="M 18 84 C 38 44, 59 90, 84 48 C 94 31, 104 33, 115 38"
+          fill="none" stroke="#e6fffa" stroke-opacity="0.5" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Chubby North Star -->
+    <path d="M 91 22 C 92.5 29, 95 31.5, 102 33 C 95 34.5, 92.5 37, 91 44 C 89.5 37, 87 34.5, 80 33 C 87 31.5, 89.5 29, 91 22 Z"
+          fill="#f8fafc"/>
+  </g>
+</svg>

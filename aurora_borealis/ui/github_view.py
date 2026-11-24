@@ -133,11 +133,11 @@ class GitHubContentView(QWidget):
         btn_back.clicked.connect(self.back_requested.emit)
         title_col = QVBoxLayout()
         lbl_t = QLabel("Additional Content — GitHub & 5e.tools Manager")
-        lbl_t.setStyleSheet("font-size:11.5pt; font-weight:bold; color:#ffffff;")
+        lbl_t.setObjectName("TitleText")
         lbl_sub = QLabel(
             "Imports Aurora Legacy (.index/.xml, excluding 3rd-party) and 5e.tools JSON datasets."
         )
-        lbl_sub.setStyleSheet("font-size:8.5pt; color:#94a3b8;")
+        lbl_sub.setObjectName("MutedText")
         title_col.addWidget(lbl_t)
         title_col.addWidget(lbl_sub)
 
@@ -178,7 +178,7 @@ class GitHubContentView(QWidget):
         hdr.addWidget(QLabel("<b>Add Aurora GitHub .index or .xml URL</b>"))
         hdr.addStretch()
         hint = QLabel("Auto-converts github.com/.../blob/... → raw.githubusercontent.com")
-        hint.setStyleSheet("font-size:8.5pt; color:#94a3b8;")
+        hint.setObjectName("MutedText")
         hdr.addWidget(hint)
         fc_layout.addLayout(hdr)
 
@@ -203,7 +203,7 @@ class GitHubContentView(QWidget):
         ft_sub = QLabel(
             "Converts 5e.tools data (races, backgrounds, feats, spells, classes, items) into Aurora XML."
         )
-        ft_sub.setStyleSheet("font-size:8.5pt; color:#94a3b8;")
+        ft_sub.setObjectName("MutedText")
         ft_info.addWidget(ft_sub)
         ft_layout.addLayout(ft_info, 1)
 
@@ -230,7 +230,7 @@ class GitHubContentView(QWidget):
         tbl_hdr.addWidget(QLabel("<b>Installed Content Sources</b>"))
         tbl_hdr.addStretch()
         lbl_loc = QLabel(f"Stored in {self.custom_root}")
-        lbl_loc.setStyleSheet("font-size:8.5pt; color:#94a3b8;")
+        lbl_loc.setObjectName("MutedText")
         tbl_hdr.addWidget(lbl_loc)
         body_layout.addLayout(tbl_hdr)
 
@@ -238,8 +238,12 @@ class GitHubContentView(QWidget):
         self.tbl_indexes.setHorizontalHeaderLabels(
             ["Source Name", "URL / Path", "Version", "XML Files", "Actions"]
         )
-        self.tbl_indexes.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.tbl_indexes.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr = self.tbl_indexes.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         self.tbl_indexes.verticalHeader().setVisible(False)
         self.tbl_indexes.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         body_layout.addWidget(self.tbl_indexes, 1)
@@ -272,6 +276,7 @@ class GitHubContentView(QWidget):
 
     def _refresh_table(self) -> None:
         self.tbl_indexes.setRowCount(len(self._records))
+        max_action_w = 150
         for r, rec in enumerate(self._records):
             self.tbl_indexes.setItem(r, 0, QTableWidgetItem(rec.name))
             self.tbl_indexes.setItem(r, 1, QTableWidgetItem(rec.url))
@@ -280,7 +285,8 @@ class GitHubContentView(QWidget):
 
             actions = QWidget()
             al = QHBoxLayout(actions)
-            al.setContentsMargins(4, 2, 4, 2)
+            al.setContentsMargins(6, 4, 6, 4)
+            al.setSpacing(6)
             btn_upd = QPushButton("Update")
             btn_upd.clicked.connect(lambda _=False, idx=r: self._update_single(idx))
             btn_rem = QPushButton("Remove")
@@ -288,7 +294,12 @@ class GitHubContentView(QWidget):
             btn_rem.clicked.connect(lambda _=False, idx=r: self._remove_single(idx))
             al.addWidget(btn_upd)
             al.addWidget(btn_rem)
+            actions.adjustSize()
+            hint = actions.sizeHint()
+            max_action_w = max(max_action_w, hint.width() + 12)
+            self.tbl_indexes.setRowHeight(r, max(42, hint.height() + 6))
             self.tbl_indexes.setCellWidget(r, 4, actions)
+        self.tbl_indexes.setColumnWidth(4, max_action_w)
 
     def _set_busy(self, busy: bool) -> None:
         for btn in (

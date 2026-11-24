@@ -614,6 +614,7 @@ class RulesEngine:
         dex_mod = mods["dexterity"]
         armor_base: Optional[int] = None
         armor_kind = ""
+        armor_magic = 0
         shield_bonus = 0
 
         for item in state.inventory:
@@ -625,24 +626,25 @@ class RulesEngine:
             kind = el.setters.get("armor", "").strip().lower()
             slot = el.setters.get("slot", "").strip().lower()
             if kind == "shield" or "shield" in el.name.lower() or slot == "shield":
-                shield_bonus = max(shield_bonus, 2)
+                shield_bonus = max(shield_bonus, 2 + max(0, item.magic_bonus))
                 continue
             if kind in ("light", "medium", "heavy"):
                 ac_str = el.setters.get("armorClass", "")
                 m = re.search(r"(\d+)", ac_str)
                 if m:
                     base_val = int(m.group(1))
-                    if armor_base is None or base_val > armor_base:
+                    if armor_base is None or (base_val + item.magic_bonus) > (armor_base + armor_magic):
                         armor_base = base_val
                         armor_kind = kind
+                        armor_magic = max(0, item.magic_bonus)
 
         if armor_base is not None:
             if armor_kind == "light":
-                ac = armor_base + dex_mod
+                ac = armor_base + dex_mod + armor_magic
             elif armor_kind == "medium":
-                ac = armor_base + min(dex_mod, 2)
+                ac = armor_base + min(dex_mod, 2) + armor_magic
             else:
-                ac = armor_base
+                ac = armor_base + armor_magic
         else:
             candidates = [10 + dex_mod]
             if "ID_WOTC_PHB_CLASS_FEATURE_BARBARIAN_UNARMORED_DEFENSE" in granted_ids:

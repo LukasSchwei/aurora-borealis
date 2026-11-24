@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -48,7 +49,10 @@ class CharacterSelectView(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._summaries: list[CharacterSummary] = []
-        self._filter_mode = "all"  # "all" or "fav"
+        self._filter_mode = "all"
+        self._ui_scale: float = 1.0
+        self._last_cols: int = 4
+        self._trash_icon_path = Path(__file__).resolve().parent.parent / "assets" / "trash-bin.svg"  # "all" or "fav"
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -62,18 +66,21 @@ class CharacterSelectView(QWidget):
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(18, 12, 18, 12)
 
-        badge = QLabel("AB")
+        badge = QLabel()
         badge.setFixedSize(34, 34)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setStyleSheet(
-            "background-color:#2b6cb0; color:#ffffff; border-radius:8px; font-weight:bold;"
-        )
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "aurora-borealis.svg"
+        if icon_path.is_file():
+            badge.setPixmap(QIcon(str(icon_path)).pixmap(34, 34))
+        else:
+            badge.setText("AB")
+            badge.setObjectName("PortraitFrame")
         title_box = QVBoxLayout()
         title_box.setSpacing(1)
         lbl_title = QLabel("Aurora Borealis")
-        lbl_title.setStyleSheet("font-size:12pt; font-weight:bold; color:#ffffff;")
+        lbl_title.setObjectName("TitleText")
         self.lbl_content_stats = QLabel("Character Library")
-        self.lbl_content_stats.setStyleSheet("font-size:8.5pt; color:#94a3b8;")
+        self.lbl_content_stats.setObjectName("MutedText")
         title_box.addWidget(lbl_title)
         title_box.addWidget(self.lbl_content_stats)
 
@@ -102,10 +109,7 @@ class CharacterSelectView(QWidget):
 
         sub_layout.addWidget(QLabel("Characters Folder:"))
         self.lbl_folder = QLabel("")
-        self.lbl_folder.setStyleSheet(
-            "background-color:#0b1017; border:1px solid #28364b; border-radius:5px; "
-            "padding:4px 8px; color:#7dd3fc; font-family:monospace;"
-        )
+        self.lbl_folder.setObjectName("FolderChip")
         btn_change = QPushButton("Change Folder…")
         btn_change.clicked.connect(self.change_folder_requested.emit)
         btn_refresh = QPushButton("↻ Refresh")
@@ -133,15 +137,15 @@ class CharacterSelectView(QWidget):
         root.addWidget(sub_bar)
 
         # Scrollable Character Grid
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
         self.grid_host = QWidget()
         self.grid = QGridLayout(self.grid_host)
         self.grid.setContentsMargins(18, 18, 18, 18)
         self.grid.setSpacing(14)
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        scroll.setWidget(self.grid_host)
-        root.addWidget(scroll, 1)
+        self.scroll_area.setWidget(self.grid_host)
+        root.addWidget(self.scroll_area, 1)
 
     def set_header_info(
         self,
@@ -174,11 +178,33 @@ class CharacterSelectView(QWidget):
         self.btn_fav.style().polish(self.btn_fav)
         self._render_cards()
 
+    def set_ui_scale(self, scale: float) -> None:
+        self._ui_scale = max(0.85, min(1.5, float(scale)))
+        self._render_cards()
+
+    def _card_size(self) -> int:
+        return round(250 * self._ui_scale)
+
+    def _compute_columns(self) -> int:
+        card_sz = self._card_size()
+        spacing = self.grid.horizontalSpacing()
+        if spacing < 0:
+            spacing = 16
+        avail = max(card_sz, self.scroll_area.viewport().width() - 36)
+        return max(1, (avail + spacing) // (card_sz + spacing))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        cols = self._compute_columns()
+        if cols != self._last_cols:
+            self._render_cards()
+
     def _render_cards(self) -> None:
         while self.grid.count():
             item = self.grid.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
 
         q = self.txt_search.text().strip().lower()
@@ -190,109 +216,125 @@ class CharacterSelectView(QWidget):
                 continue
             filtered.append(s)
 
-        cols = 3
+        card_sz = self._card_size()
+        cols = self._compute_columns()
+        self._last_cols = cols
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+
         for idx, summary in enumerate(filtered):
             r, c = divmod(idx, cols)
-            self.grid.addWidget(self._make_card(summary), r, c)
+            self.grid.addWidget(self._make_card(summary, card_sz), r, c)
 
-        # Dashed "+ Create New Character" card at the end
+        # Dashed "+ Create New Character" square card at the end
         r_new, c_new = divmod(len(filtered), cols)
-        new_btn = QPushButton("+\n\nCreate New Character\nChoose 5e / 5.5e & Portrait")
+        new_btn = QPushButton("+\n\nNew Character\n5e / 5.5e")
         new_btn.setObjectName("NewCharDashedCard")
-        new_btn.setMinimumSize(310, 185)
+        new_btn.setFixedSize(card_sz, card_sz)
+        new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         new_btn.clicked.connect(self.new_character_requested.emit)
         self.grid.addWidget(new_btn, r_new, c_new)
 
-    def _make_card(self, s: CharacterSummary) -> QFrame:
+    def _make_card(self, s: CharacterSummary, card_sz: int) -> QFrame:
         card = _ClickableCard()
         card.setObjectName("CharCard")
         card.setCursor(Qt.CursorShape.PointingHandCursor)
         card.clicked.connect(lambda: self.open_character_requested.emit(s.path))
-        card.setMinimumWidth(310)
-        card.setMinimumHeight(185)
-        vbox = QVBoxLayout(card)
-        vbox.setContentsMargins(14, 14, 14, 12)
-        vbox.setSpacing(10)
+        card.setFixedSize(card_sz, card_sz)
 
-        # Top row: portrait + title + favorite + ruleset pill
-        top = QHBoxLayout()
-        portrait_lbl = QLabel()
-        portrait_lbl.setObjectName("PortraitFrame")
-        portrait_lbl.setFixedSize(48, 48)
-        portrait_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pix = pixmap_from_portrait(s.portrait_base64, s.portrait_path, size=48)
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(0, 0, 0, 10)
+        vbox.setSpacing(6)
+
+        # Main portrait square-ish area (~60% of the card height)
+        portrait_h = round(card_sz * 0.58)
+        portrait_btn = QPushButton()
+        portrait_btn.setObjectName("CharPortraitBtn")
+        portrait_btn.setFixedHeight(portrait_h)
+        portrait_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        portrait_btn.clicked.connect(lambda: self.open_character_requested.emit(s.path))
+
+        pix = pixmap_from_portrait(s.portrait_base64, s.portrait_path, size=card_sz)
         if pix:
-            portrait_lbl.setPixmap(pix)
+            scaled = pix.scaled(
+                card_sz - 2,
+                portrait_h,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x_off = max(0, (scaled.width() - (card_sz - 2)) // 2)
+            y_off = max(0, (scaled.height() - portrait_h) // 2)
+            cropped = scaled.copy(x_off, y_off, card_sz - 2, portrait_h)
+            portrait_btn.setIcon(QIcon(cropped))
+            portrait_btn.setIconSize(QSize(card_sz - 2, portrait_h))
         else:
             initials = (s.name[:2] or "AB").upper()
-            portrait_lbl.setText(initials)
+            portrait_btn.setText(initials)
 
-        info_col = QVBoxLayout()
-        info_col.setSpacing(2)
-        lbl_name = QLabel(s.name)
-        lbl_name.setStyleSheet("font-weight:bold; font-size:11pt; color:#ffffff;")
-        subtitle = f"Lv {s.level} {s.race or '—'} {s.class_name or '—'}".strip()
-        lbl_sub = QLabel(subtitle)
-        lbl_sub.setStyleSheet("font-size:9pt; color:#94a3b8;")
-        info_col.addWidget(lbl_name)
-        info_col.addWidget(lbl_sub)
+        # Overlay top bar inside portrait area (Ruleset pill + Favorite star)
+        overlay = QHBoxLayout(portrait_btn)
+        overlay.setContentsMargins(8, 8, 8, 8)
+        overlay.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         pill = QLabel(s.ruleset or "5e")
         pill.setObjectName("RulesetPill")
         pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         btn_fav = QPushButton("★" if s.favorite else "☆")
+        btn_fav.setObjectName("FavBtn")
+        btn_fav.setProperty("fav", "true" if s.favorite else "false")
         btn_fav.setFixedSize(28, 28)
-        btn_fav.setStyleSheet(
-            f"color:{'#facc15' if s.favorite else '#64748b'}; border:none; background:transparent; font-size:13pt;"
-        )
         btn_fav.clicked.connect(lambda: self.toggle_favorite_requested.emit(s.filename))
 
-        top.addWidget(portrait_lbl)
-        top.addLayout(info_col, 1)
-        top.addWidget(pill)
-        top.addWidget(btn_fav)
-        vbox.addLayout(top)
+        overlay.addWidget(pill)
+        overlay.addStretch()
+        overlay.addWidget(btn_fav)
+        vbox.addWidget(portrait_btn)
 
-        # Stat pills row
-        stats_row = QHBoxLayout()
-        for label, val in (
-            ("HP", str(s.hp or "—")),
-            ("AC", str(s.ac)),
-            ("SPD", f"{s.speed}"),
-        ):
-            box = QLabel(f"<span style='color:#94a3b8;'>{label}</span> <b>{val}</b>")
-            box.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            box.setStyleSheet(
-                "background-color:#0f141d; border:1px solid #243247; border-radius:6px; padding:4px;"
-            )
-            stats_row.addWidget(box)
-        vbox.addLayout(stats_row)
+        # Compact info + actions footer
+        body = QWidget()
+        body_l = QVBoxLayout(body)
+        body_l.setContentsMargins(10, 0, 10, 0)
+        body_l.setSpacing(4)
 
-        # Footer row
+        lbl_name = QLabel(s.name)
+        lbl_name.setObjectName("TitleText")
+        lbl_name.setWordWrap(False)
+        subtitle = f"Lv {s.level} {s.race or '—'} {s.class_name or '—'}".strip()
+        lbl_sub = QLabel(subtitle)
+        lbl_sub.setObjectName("MutedText")
+        body_l.addWidget(lbl_name)
+        body_l.addWidget(lbl_sub)
+
         footer = QHBoxLayout()
-        lbl_file = QLabel(s.filename)
-        lbl_file.setStyleSheet("font-size:8.5pt; color:#64748b; font-family:monospace;")
-        footer.addWidget(lbl_file, 1)
+        footer.setSpacing(4)
 
         btn_open = QPushButton("Open")
         btn_open.setObjectName("PrimaryBtn")
         btn_open.clicked.connect(lambda: self.open_character_requested.emit(s.path))
 
         btn_pdf = QPushButton("PDF")
+        btn_pdf.setObjectName("CompactCardBtn")
         btn_pdf.clicked.connect(lambda: self.export_pdf_requested.emit(s.path))
 
         btn_dup = QPushButton("Copy")
+        btn_dup.setObjectName("CompactCardBtn")
         btn_dup.clicked.connect(lambda: self.duplicate_character_requested.emit(s.path))
 
-        btn_del = QPushButton("✕")
-        btn_del.setObjectName("DangerBtn")
-        btn_del.setFixedWidth(30)
+        btn_del = QPushButton()
+        btn_del.setObjectName("TrashBtn")
+        btn_del.setToolTip("Delete Character")
+        if self._trash_icon_path.is_file():
+            btn_del.setIcon(QIcon(str(self._trash_icon_path)))
+            icon_px = max(16, round(18 * self._ui_scale))
+            btn_del.setIconSize(QSize(icon_px, icon_px))
+        else:
+            btn_del.setText("🗑")
         btn_del.clicked.connect(lambda: self.delete_character_requested.emit(s.path))
 
-        footer.addWidget(btn_open)
+        footer.addWidget(btn_open, 1)
         footer.addWidget(btn_pdf)
         footer.addWidget(btn_dup)
         footer.addWidget(btn_del)
-        vbox.addLayout(footer)
+        body_l.addLayout(footer)
+        vbox.addWidget(body, 1)
         return card

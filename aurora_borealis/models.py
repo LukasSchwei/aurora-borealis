@@ -126,6 +126,9 @@ class InventoryItem:
     equipped: bool = False
     weight: float = 0.0
     category: str = ""
+    magic_bonus: int = 0
+    enchantment: str = ""
+    attuned: bool = False
 
 
 @dataclass
@@ -152,6 +155,7 @@ class CharacterState:
     class_id: str = ""
     background_id: str = ""
     level: int = 1
+    xp: int = 0
 
     abilities: dict[str, int] = field(
         default_factory=lambda: {

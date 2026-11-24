@@ -19,14 +19,19 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
 )
 
-from ..models import DuplicateEntry
+from ..engine import parse_weight_lb
+from ..loader import ContentRepository
+from ..models import DuplicateEntry, Element, InventoryItem
 from ..persistence import encode_portrait_file
 
 
@@ -199,3 +204,177 @@ class DuplicateReportDialog(QDialog):
             self.table.setItem(r, 2, QTableWidgetItem(d.name))
             self.table.setItem(r, 3, QTableWidgetItem(d.kept_source or "—"))
             self.table.setItem(r, 4, QTableWidgetItem(d.duplicate_source or "—"))
+
+
+_ARMOR_TEMPLATES: list[tuple[str, int]] = [
+    ("Magic Armor / Shield (+1)", 1),
+    ("Magic Armor / Shield (+2)", 2),
+    ("Magic Armor / Shield (+3)", 3),
+    ("Artificer Infusion: Enhanced Defense (+1 AC)", 1),
+    ("Artificer Infusion: Enhanced Defense Lv 10+ (+2 AC)", 2),
+    ("Artificer Infusion: Repulsion Shield (+1 AC)", 1),
+    ("Artificer Infusion: Resistant Armor", 0),
+    ("Artificer Infusion: Armor of Magical Strength", 0),
+    ("Adamantine Armor", 0),
+    ("Mithral Armor", 0),
+    ("Armor of Gleaming", 0),
+    ("Cast-Off Armor", 0),
+    ("Mariner's Armor", 0),
+    ("Mizzium Armor", 0),
+    ("Sentinel Shield", 0),
+    ("Custom Enchantment / Infusion", 0),
+]
+
+_WEAPON_TEMPLATES: list[tuple[str, int]] = [
+    ("Magic Weapon (+1)", 1),
+    ("Magic Weapon (+2)", 2),
+    ("Magic Weapon (+3)", 3),
+    ("Artificer Infusion: Enhanced Weapon (+1)", 1),
+    ("Artificer Infusion: Enhanced Weapon Lv 10+ (+2)", 2),
+    ("Artificer Infusion: Repeating Shot (+1)", 1),
+    ("Artificer Infusion: Returning Weapon (+1)", 1),
+    ("Artificer Infusion: Radiant Weapon (+1)", 1),
+    ("Silvered Weapon", 0),
+    ("Adamantine Weapon", 0),
+    ("Vicious Weapon", 0),
+    ("Weapon of Warning", 0),
+    ("Flame Tongue", 0),
+    ("Frost Brand", 0),
+    ("Moon-Touched Weapon", 0),
+    ("Custom Enchantment / Infusion", 0),
+]
+
+
+class MagicGearDialog(QDialog):
+    """Create a magic / Artificer-infused variant of any Armor, Shield, or Weapon."""
+
+    def __init__(
+        self,
+        repo: ContentRepository,
+        initial_element: Optional[Element] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.repo = repo
+        self._selected_base: Optional[Element] = None
+        self.setWindowTitle("Create Magic / Infused Armor or Weapon")
+        self.setMinimumSize(620, 480)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        top_filter = QHBoxLayout()
+        self.cmb_kind = QComboBox()
+        self.cmb_kind.addItems(["All (Armor & Weapons)", "Armor", "Weapon"])
+        if initial_element and initial_element.type in ("Armor", "Weapon"):
+            self.cmb_kind.setCurrentText(initial_element.type)
+        self.cmb_kind.currentIndexChanged.connect(self._refresh_base_list)
+
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("Search base armor, shield, or weapon…")
+        self.txt_search.textChanged.connect(self._refresh_base_list)
+        top_filter.addWidget(self.cmb_kind, 1)
+        top_filter.addWidget(self.txt_search, 2)
+        layout.addLayout(top_filter)
+
+        self.lst_base = QListWidget()
+        self.lst_base.currentItemChanged.connect(self._on_base_changed)
+        layout.addWidget(self.lst_base, 1)
+
+        form = QFormLayout()
+        self.cmb_template = QComboBox()
+        self.cmb_template.currentIndexChanged.connect(self._on_template_changed)
+        form.addRow("Magic / Infusion:", self.cmb_template)
+
+        self.spn_bonus = QSpinBox()
+        self.spn_bonus.setRange(0, 3)
+        self.spn_bonus.setPrefix("+")
+        self.spn_bonus.valueChanged.connect(self._update_preview_name)
+        form.addRow("Magic Bonus:", self.spn_bonus)
+
+        self.txt_name = QLineEdit()
+        self.txt_name.setPlaceholderText("Resulting item name…")
+        form.addRow("Item Name:", self.txt_name)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Add to Inventory")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._refresh_base_list(initial_id=initial_element.id if initial_element else "")
+
+    def _refresh_base_list(self, _idx: int = 0, initial_id: str = "") -> None:
+        q = self.txt_search.text().strip()
+        kind = self.cmb_kind.currentText()
+        types = ["Armor", "Weapon"] if kind.startswith("All") else [kind]
+        items = self.repo.search(q, types)
+        items.sort(key=lambda e: (e.type, e.name.lower()))
+        self.lst_base.clear()
+        target_row = 0
+        for i, el in enumerate(items[:400]):
+            it = QListWidgetItem(f"[{el.type}] {el.name}")
+            it.setData(Qt.ItemDataRole.UserRole, el.id)
+            self.lst_base.addItem(it)
+            if initial_id and el.id == initial_id:
+                target_row = i
+        if self.lst_base.count() > 0:
+            self.lst_base.setCurrentRow(target_row)
+
+    def _on_base_changed(self, current: Optional[QListWidgetItem]) -> None:
+        if current is None:
+            self._selected_base = None
+            return
+        eid = current.data(Qt.ItemDataRole.UserRole) or ""
+        self._selected_base = self.repo.get(eid)
+        if self._selected_base is None:
+            return
+        templates = _ARMOR_TEMPLATES if self._selected_base.type == "Armor" else _WEAPON_TEMPLATES
+        self.cmb_template.blockSignals(True)
+        self.cmb_template.clear()
+        for label, bonus in templates:
+            self.cmb_template.addItem(label, bonus)
+        self.cmb_template.blockSignals(False)
+        self._on_template_changed(0)
+
+    def _on_template_changed(self, _idx: int) -> None:
+        bonus = self.cmb_template.currentData()
+        if bonus is not None:
+            self.spn_bonus.blockSignals(True)
+            self.spn_bonus.setValue(int(bonus))
+            self.spn_bonus.blockSignals(False)
+        self._update_preview_name()
+
+    def _update_preview_name(self) -> None:
+        if self._selected_base is None:
+            return
+        base_name = self._selected_base.name
+        tpl_label = self.cmb_template.currentText()
+        bonus = self.spn_bonus.value()
+        short = tpl_label.replace("Artificer Infusion: ", "").split("(")[0].strip()
+        if short in ("Magic Armor / Shield", "Magic Weapon"):
+            self.txt_name.setText(f"{base_name} (+{bonus})" if bonus > 0 else base_name)
+        elif short == "Custom Enchantment / Infusion":
+            self.txt_name.setText(f"Magic {base_name} (+{bonus})" if bonus > 0 else f"Magic {base_name}")
+        else:
+            suffix = f" +{bonus}" if bonus > 0 else ""
+            self.txt_name.setText(f"{base_name} ({short}{suffix})")
+
+    def build_inventory_item(self) -> Optional[InventoryItem]:
+        if self._selected_base is None:
+            return None
+        el = self._selected_base
+        name = self.txt_name.text().strip() or el.name
+        return InventoryItem(
+            element_id=el.id,
+            name=name,
+            quantity=1,
+            equipped=True,
+            weight=parse_weight_lb(el),
+            category=el.type,
+            magic_bonus=self.spn_bonus.value(),
+            enchantment=self.cmb_template.currentText(),
+        )

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import re
 from pathlib import Path
 
 from lxml import etree
 
+from .engine import RulesEngine
 from .loader import ContentRepository
 from .models import ABILITIES, CharacterState, ComputedCharacter, InventoryItem
 
@@ -57,6 +59,7 @@ def save_dnd5e(
     etree.SubElement(disp, "archetype").text = ""
     etree.SubElement(disp, "background").text = bg_el.name if bg_el else ""
     etree.SubElement(disp, "level").text = str(state.level)
+    etree.SubElement(disp, "experience").text = str(state.xp)
     etree.SubElement(disp, "ruleset").text = state.ruleset or "5e"
     etree.SubElement(disp, "hp").text = str(computed.max_hp)
     etree.SubElement(disp, "ac").text = str(computed.armor_class)
@@ -72,6 +75,7 @@ def save_dnd5e(
     inp = etree.SubElement(build, "input")
     etree.SubElement(inp, "name").text = state.name
     etree.SubElement(inp, "player-name").text = state.player_name
+    etree.SubElement(inp, "experience").text = str(state.xp)
     etree.SubElement(inp, "ruleset").text = state.ruleset or "5e"
     etree.SubElement(inp, "gender").text = state.gender
     etree.SubElement(inp, "faith").text = state.faith
@@ -152,6 +156,12 @@ def save_dnd5e(
             "weight": str(item.weight),
             "category": item.category,
         }
+        if item.magic_bonus:
+            attrs["magic-bonus"] = str(item.magic_bonus)
+        if item.enchantment:
+            attrs["enchantment"] = item.enchantment
+        if item.attuned:
+            attrs["attuned"] = "true"
         etree.SubElement(equip_node, "item", **attrs)
 
     # Magic / Spells
@@ -202,6 +212,9 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
         lvl_txt = (disp.findtext("level") or "").strip()
         if lvl_txt.isdigit():
             state.level = max(1, min(20, int(lvl_txt)))
+        xp_disp = (disp.findtext("experience") or "").strip()
+        if xp_disp.isdigit():
+            state.xp = int(xp_disp)
         rs = (disp.findtext("ruleset") or "").strip()
         if rs in ("5e", "5.5e"):
             state.ruleset = rs
@@ -215,13 +228,26 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
     if inp is not None:
         state.name = (inp.findtext("name") or state.name).strip()
         state.player_name = (inp.findtext("player-name") or state.player_name).strip()
+        xp_inp = (inp.findtext("experience") or "").strip()
+        if xp_inp.isdigit():
+            state.xp = int(xp_inp)
         rs_inp = (inp.findtext("ruleset") or "").strip()
         if rs_inp in ("5e", "5.5e"):
             state.ruleset = rs_inp
         state.gender = (inp.findtext("gender") or "").strip()
         state.faith = (inp.findtext("faith") or "").strip()
-        state.backstory = (inp.findtext("backstory") or "").strip()
-        state.notes = (inp.findtext("notes") or "").strip()
+        state.backstory = (
+            inp.findtext("backstory")
+            or inp.findtext("background-story")
+            or ""
+        ).strip()
+        notes_el = inp.find("notes")
+        if notes_el is not None:
+            sub_notes = [(n.text or "").strip() for n in notes_el.findall("note") if (n.text or "").strip()]
+            if sub_notes:
+                state.notes = "\n\n".join(sub_notes)
+            else:
+                state.notes = (notes_el.text or "").strip()
         if not state.portrait_path:
             state.portrait_path = (inp.findtext("portrait") or "").strip()
         if not state.portrait_base64:
@@ -229,6 +255,8 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
 
         app = inp.find("appearance")
         if app is not None:
+            if not state.gender:
+                state.gender = (app.findtext("gender") or "").strip()
             state.age = (app.findtext("age") or "").strip()
             state.height = (app.findtext("height") or "").strip()
             state.weight = (app.findtext("weight") or "").strip()
@@ -267,11 +295,18 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                     if val:
                         state.background_asi[ab] = val
 
+    legacy_element_ids: list[str] = []
     elems_node = build.find("elements")
     if elems_node is not None:
+        max_lvl = 0
         for el in elems_node.findall(".//element"):
             etype = (el.get("type") or "").strip()
             eid = (el.get("id") or "").strip()
+            reg = (el.get("registered") or "").strip()
+            if reg and reg.lower() not in ("true", "false") and reg not in legacy_element_ids:
+                legacy_element_ids.append(reg)
+            if eid and eid not in legacy_element_ids:
+                legacy_element_ids.append(eid)
             if not eid:
                 continue
             if etype == "Race" and not state.race_id:
@@ -287,7 +322,16 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
             elif etype == "Level":
                 name_txt = (el.get("name") or "").strip()
                 if name_txt.isdigit():
-                    state.level = max(1, min(20, int(name_txt)))
+                    max_lvl = max(max_lvl, int(name_txt))
+        if max_lvl > 0:
+            state.level = max(1, min(20, max_lvl))
+
+    sum_node = build.find("sum")
+    if sum_node is not None:
+        for el in sum_node.findall(".//element"):
+            eid = (el.get("id") or "").strip()
+            if eid and eid not in legacy_element_ids:
+                legacy_element_ids.append(eid)
 
     sel_node = build.find("selections")
     if sel_node is not None:
@@ -296,10 +340,34 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
             val = (s.get("value") or "").strip()
             if key and val:
                 state.selections.setdefault(key, []).append(val)
+    elif legacy_element_ids and repo.by_id:
+        # Backward compatibility with original Aurora Builder .dnd5e files:
+        # reconstruct user selections from nested <build><elements> / <sum> IDs.
+        engine = RulesEngine(repo)
+        consumed_ids: set[str] = set()
+        for _ in range(6):
+            comp = engine.evaluate(state)
+            progressed = False
+            for active_sel in comp.active_selections:
+                existing = list(state.selections.get(active_sel.key, []))
+                if len([v for v in existing if v]) >= active_sel.rule.number:
+                    continue
+                opt_ids = {oid for oid, _oname in active_sel.options}
+                for cand in legacy_element_ids:
+                    if len([v for v in existing if v]) >= active_sel.rule.number:
+                        break
+                    if cand in opt_ids and cand not in existing and cand not in consumed_ids:
+                        existing.append(cand)
+                        consumed_ids.add(cand)
+                        progressed = True
+                if existing:
+                    state.selections[active_sel.key] = existing[: active_sel.rule.number]
+            if not progressed:
+                break
 
     equip_node = build.find("equipment")
     if equip_node is not None:
-        for item in equip_node.findall("item"):
+        for item in equip_node.findall(".//item"):
             eid = (item.get("identifier") or item.get("id") or "").strip()
             name = (item.get("name") or "").strip()
             el = repo.get(eid) if eid else None
@@ -310,11 +378,16 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
             except ValueError:
                 qty = 1
             equipped = (item.get("equipped") or "").lower() == "true"
-            try:
-                w = float(item.get("weight") or "0")
-            except ValueError:
-                w = 0.0
+            raw_w = (item.get("weight") or "0").strip()
+            m_w = re.search(r"(\d+(?:\.\d+)?)", raw_w)
+            w = float(m_w.group(1)) if m_w else 0.0
             cat = (item.get("category") or (el.type if el else "")).strip()
+            try:
+                m_bonus = int(item.get("magic-bonus") or "0")
+            except ValueError:
+                m_bonus = 0
+            ench = (item.get("enchantment") or "").strip()
+            attuned = (item.get("attuned") or "").lower() == "true"
             if eid or name:
                 state.inventory.append(
                     InventoryItem(
@@ -324,6 +397,9 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                         equipped=equipped,
                         weight=w,
                         category=cat,
+                        magic_bonus=m_bonus,
+                        enchantment=ench,
+                        attuned=attuned,
                     )
                 )
 
@@ -335,7 +411,10 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
             if not sid:
                 continue
             is_known = (sp.get("known") or "true").lower() == "true"
-            is_prep = (sp.get("prepared") or "false").lower() == "true"
+            is_prep = (
+                (sp.get("prepared") or "false").lower() == "true"
+                or (sp.get("always-prepared") or "false").lower() == "true"
+            )
             if is_known and sid not in state.known_spells:
                 state.known_spells.append(sid)
             if is_prep and sid not in state.prepared_spells:

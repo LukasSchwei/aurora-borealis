@@ -234,11 +234,16 @@ class AuroraBorealisTests(unittest.TestCase):
             self.assertEqual(win.state.class_id, "ID_WOTC_PHB_CLASS_WIZARD")
             self.assertFalse(win.chk_manual_spells.isChecked())
             self.assertFalse(win.state.allow_extra_spells)
-            self.assertGreater(win.lst_spell_catalog.count(), 0)
+            self.assertGreater(win.tbl_spell_catalog.rowCount(), 0)
             self.assertGreater(win.tbl_equip_catalog.rowCount(), 0)
-            # Spell list rows use custom widgets cleanly; equipment table uses Type/Name/Rarity/Weight/Cost columns
-            self.assertEqual(win.lst_spell_catalog.item(0).text(), "")
+            # Spell catalog uses Name/Level columns with clickable sorting; equipment uses Type/Name/Rarity/Weight/Cost
+            self.assertTrue(bool(win.tbl_spell_catalog.item(0, 0).text()))
             self.assertNotIn("[Weapon]", win.tbl_equip_catalog.item(0, 1).text())
+            win._on_spell_header_clicked(1)
+            self.assertEqual(win._spell_sort_col, 1)
+            self.assertEqual(win._spell_sort_order, Qt.SortOrder.AscendingOrder)
+            win._on_spell_header_clicked(1)
+            self.assertEqual(win._spell_sort_order, Qt.SortOrder.DescendingOrder)
 
             # Skills & Saving Throws tables fit directly without an enclosing QScrollArea
             self.assertEqual(win.tbl_saves.rowCount(), 6)
@@ -271,6 +276,321 @@ class AuroraBorealisTests(unittest.TestCase):
             dup_dlg = DuplicateReportDialog(self.repo.duplicates, win)
             self.assertEqual(dup_dlg.table.rowCount(), len(self.repo.duplicates))
             win._dirty = False
+            win.current_file = tmp_path / "test.dnd5e"
+            win.close()
+
+    def test_06_ui_fixes_spell_sort_tables_choices_spinboxes(self) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit
+        from aurora_borealis.config import AppConfig
+        from aurora_borealis.loader import ContentRepository
+        from aurora_borealis.models import Element, GrantRule, SelectRule
+        from aurora_borealis.ui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        repo = ContentRepository()
+        for el in [
+            Element(id="ID_SP_Z", name="Zeta Bolt", type="Spell", setters={"level": "1"}),
+            Element(id="ID_SP_A", name="Acid Splash", type="Spell", setters={"level": "0"}),
+            Element(id="ID_SP_F", name="Fireball", type="Spell", setters={"level": "3"}),
+            Element(id="ID_SP_M", name="Magic Missile", type="Spell", setters={"level": "1"}),
+            Element(id="ID_SKILL_ATH", name="Skill (Athletics)", type="Proficiency", supports=["Skill"]),
+            Element(id="ID_SKILL_PER", name="Skill (Perception)", type="Proficiency", supports=["Skill"]),
+            Element(id="ID_SKILL_STE", name="Skill (Stealth)", type="Proficiency", supports=["Skill"]),
+            Element(id="ID_LANG_COMMON", name="Common", type="Language", supports=["Standard"]),
+            Element(id="ID_LANG_ELVISH", name="Elvish", type="Language", supports=["Standard"]),
+            Element(id="ID_LANG_DWARVISH", name="Dwarvish", type="Language", supports=["Standard"]),
+            Element(
+                id="ID_RACE_TEST",
+                name="Test Elf",
+                type="Race",
+                grant_rules=[GrantRule(type="Language", id="ID_LANG_COMMON", level=1)],
+                select_rules=[
+                    SelectRule(type="Language", name="Extra Language", number=2, level=1, supports="Standard"),
+                ],
+            ),
+            Element(
+                id="ID_CLASS_TEST",
+                name="Test Rogue",
+                type="Class",
+                select_rules=[
+                    SelectRule(type="Proficiency", name="Class Skills", number=2, level=1, supports="Skill"),
+                ],
+            ),
+        ]:
+            repo.by_id[el.id] = el
+            repo.by_type[el.type].append(el)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            win = MainWindow(
+                repo,
+                tmp_path,
+                custom_dir=tmp_path / "custom",
+                templates_dir=tmp_path / "templates",
+                config=AppConfig(characters_dir=str(tmp_path / "chars")),
+                config_path=tmp_path / "config.json",
+                auto_sync=False,
+            )
+            win.show_builder()
+            win.show()
+            app.processEvents()
+
+            # 1. Spell catalog sorting by Name (col 0) and Level (col 1)
+            names_asc = [win.tbl_spell_catalog.item(r, 0).text() for r in range(win.tbl_spell_catalog.rowCount())]
+            self.assertEqual(names_asc, ["Acid Splash", "Fireball", "Magic Missile", "Zeta Bolt"])
+            win._on_spell_header_clicked(0)
+            names_desc = [win.tbl_spell_catalog.item(r, 0).text() for r in range(win.tbl_spell_catalog.rowCount())]
+            self.assertEqual(names_desc, ["Zeta Bolt", "Magic Missile", "Fireball", "Acid Splash"])
+            win._on_spell_header_clicked(1)
+            lvls_asc = [win.tbl_spell_catalog.item(r, 0).text() for r in range(win.tbl_spell_catalog.rowCount())]
+            self.assertEqual(lvls_asc, ["Acid Splash", "Magic Missile", "Zeta Bolt", "Fireball"])
+            win._on_spell_header_clicked(1)
+            lvls_desc = [win.tbl_spell_catalog.item(r, 0).text() for r in range(win.tbl_spell_catalog.rowCount())]
+            self.assertEqual(lvls_desc, ["Fireball", "Zeta Bolt", "Magic Missile", "Acid Splash"])
+
+            # 2. Saving Throws & Skills tables show all rows without scrolling
+            win.builder_tabs_stack.setCurrentIndex(6)
+            app.processEvents()
+            self.assertEqual(win.tbl_saves.verticalScrollBar().maximum(), 0)
+            self.assertEqual(win.tbl_skills.verticalScrollBar().maximum(), 0)
+            self.assertEqual(win.tbl_saves.rowHeight(0), 22)
+            self.assertEqual(win.tbl_skills.rowHeight(0), 22)
+
+            # 3. No duplicate choices within a multi-slot choice or against already-granted elements
+            win.select_race_by_id("ID_RACE_TEST")
+            win.select_class_by_id("ID_CLASS_TEST")
+            app.processEvents()
+            def _layout_combos(layout) -> list[QComboBox]:
+                out: list[QComboBox] = []
+                for i in range(layout.count()):
+                    w = layout.itemAt(i).widget()
+                    if w is not None:
+                        out.extend(w.findChildren(QComboBox))
+                return out
+
+            lang_combos = _layout_combos(win.tab_race.choices_layout)
+            self.assertEqual(len(lang_combos), 2)
+            # Already-granted Common must not appear in either Language combo
+            for cmb in lang_combos:
+                data_vals = [cmb.itemData(i) for i in range(cmb.count())]
+                self.assertNotIn("ID_LANG_COMMON", data_vals)
+                self.assertIn("ID_LANG_ELVISH", data_vals)
+                self.assertIn("ID_LANG_DWARVISH", data_vals)
+
+            # Selecting Elvish in slot 0 removes Elvish from slot 1
+            lang_combos[0].setCurrentIndex(lang_combos[0].findData("ID_LANG_ELVISH"))
+            app.processEvents()
+            lang_combos_after = _layout_combos(win.tab_race.choices_layout)
+            self.assertEqual(len(lang_combos_after), 2)
+            slot0_vals = [lang_combos_after[0].itemData(i) for i in range(lang_combos_after[0].count())]
+            slot1_vals = [lang_combos_after[1].itemData(i) for i in range(lang_combos_after[1].count())]
+            self.assertIn("ID_LANG_ELVISH", slot0_vals)
+            self.assertNotIn("ID_LANG_ELVISH", slot1_vals)
+            self.assertIn("ID_LANG_DWARVISH", slot1_vals)
+
+            # Selecting Athletics in Class Skills slot 0 removes Athletics from slot 1
+            skill_combos = _layout_combos(win.tab_class.choices_layout)
+            skill_combos[0].setCurrentIndex(skill_combos[0].findData("ID_SKILL_ATH"))
+            app.processEvents()
+            skill_combos_after = _layout_combos(win.tab_class.choices_layout)
+            sk1_vals = [skill_combos_after[1].itemData(i) for i in range(skill_combos_after[1].count())]
+            self.assertNotIn("ID_SKILL_ATH", sk1_vals)
+            self.assertIn("ID_SKILL_PER", sk1_vals)
+
+            # 4. Level & Ability score spinboxes have full usable inner QLineEdit width
+            win.builder_tabs_stack.setCurrentIndex(2)
+            app.processEvents()
+            lvl_le = win.spn_level.findChild(QLineEdit)
+            self.assertGreaterEqual(lvl_le.width(), 30)
+
+            win.builder_tabs_stack.setCurrentIndex(4)
+            app.processEvents()
+            for spn in win.ab_spinboxes.values():
+                le = spn.findChild(QLineEdit)
+                self.assertGreaterEqual(le.width(), 30)
+
+            # 5. SVG App Icon loaded, File/Tools menu bar removed, KDE custom titlebar + +/- scale + theme
+            self.assertFalse(win.windowIcon().isNull())
+            self.assertFalse(win.menuBar().isVisible())
+            self.assertEqual(len(win.menuBar().actions()), 0)
+            self.assertGreaterEqual(len(win.actions()), 5)
+            self.assertTrue(bool(win.windowFlags() & Qt.WindowType.FramelessWindowHint))
+            self.assertFalse(win.title_bar.btn_min.icon().isNull())
+            self.assertFalse(win.title_bar.btn_max.icon().isNull())
+            self.assertFalse(win.title_bar.btn_close.icon().isNull())
+            self.assertEqual(win.config.theme, "dark")
+            win.toggle_theme()
+            self.assertEqual(win.config.theme, "light")
+            self.assertEqual(win.title_bar.btn_theme.text(), "☾")
+            win.toggle_theme()
+            self.assertEqual(win.config.theme, "dark")
+            self.assertEqual(win.title_bar.btn_theme.text(), "☀")
+            win.title_bar.btn_scale_plus.click()
+            self.assertEqual(win.title_bar.lbl_scale_val.text(), "110%")
+            win.title_bar.btn_scale_minus.click()
+            self.assertEqual(win.title_bar.lbl_scale_val.text(), "100%")
+
+            win._dirty = False
+            win.current_file = tmp_path / "test.dnd5e"
+            win.close()
+
+    def test_07_filters_overwrite_guard_legacy_dnd5e_and_cards(self) -> None:
+        from unittest import mock
+        from PySide6.QtWidgets import QApplication, QFrame, QPushButton
+        from aurora_borealis.config import AppConfig
+        from aurora_borealis.loader import ContentRepository
+        from aurora_borealis.models import CharacterState, Element, SelectRule
+        from aurora_borealis.persistence import load_dnd5e
+        from aurora_borealis.ui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        repo = ContentRepository()
+        for el in [
+            Element(id="ID_SP_FB", name="Fireball", type="Spell", setters={"level": "3", "school": "Evocation"}),
+            Element(id="ID_SP_ID", name="Identify", type="Spell", setters={"level": "1", "school": "Divination", "isRitual": "true"}),
+            Element(id="ID_IT_POT", name="Potion of Healing", type="Magic Item", setters={"rarity": "Common", "category": "Potion"}),
+            Element(id="ID_IT_SWD", name="Longsword", type="Weapon", setters={"rarity": "Common", "category": "Weapon"}),
+            Element(id="ID_SKILL_ARC", name="Skill (Arcana)", type="Proficiency", supports=["Skill"]),
+            Element(id="ID_CLS_WIZ", name="Wizard", type="Class", select_rules=[
+                SelectRule(type="Proficiency", name="Wizard Skill", number=1, level=1, supports="Skill"),
+            ]),
+        ]:
+            repo.by_id[el.id] = el
+            repo.by_type[el.type].append(el)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            # 1. Backward compatibility with original Aurora .dnd5e XML (no <selections>, nested elements, <notes><note>, <storage>)
+            legacy_xml = p / "legacy_aurora.dnd5e"
+            legacy_xml.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<character version="0.2">
+  <display-properties><name>Legacy Merlyn</name><level>3</level></display-properties>
+  <build>
+    <input>
+      <name>Legacy Merlyn</name>
+      <background-story>Born in Waterdeep.</background-story>
+      <notes><note column="left">Left note</note><note column="right">Right note</note></notes>
+    </input>
+    <abilities><strength>8</strength><dexterity>14</dexterity><constitution>12</constitution><intelligence>16</intelligence><wisdom>10</wisdom><charisma>10</charisma></abilities>
+    <elements>
+      <element type="Level" name="1" id="ID_LVL_1">
+        <element type="Class" name="Wizard" id="ID_CLS_WIZ">
+          <element type="Proficiency" name="Skill (Arcana)" id="ID_SKILL_ARC" />
+        </element>
+      </element>
+      <element type="Level" name="2" id="ID_LVL_2" />
+      <element type="Level" name="3" id="ID_LVL_3" />
+    </elements>
+    <equipment>
+      <storage>
+        <item identifier="ID_IT_POT" name="Potion of Healing" amount="2" weight="0.5 lb." equipped="false" />
+      </storage>
+    </equipment>
+    <magic><spellcasting name="Wizard" ability="Intelligence"><spells><spell id="ID_SP_FB" always-prepared="true" /></spells></spellcasting></magic>
+  </build>
+</character>
+""",
+                encoding="utf-8",
+            )
+            loaded = load_dnd5e(legacy_xml, repo)
+            self.assertEqual(loaded.name, "Legacy Merlyn")
+            self.assertEqual(loaded.level, 3)
+            self.assertEqual(loaded.class_id, "ID_CLS_WIZ")
+            self.assertEqual(loaded.backstory, "Born in Waterdeep.")
+            self.assertIn("Left note", loaded.notes)
+            self.assertIn("Right note", loaded.notes)
+            self.assertEqual(len(loaded.inventory), 1)
+            self.assertAlmostEqual(loaded.inventory[0].weight, 0.5)
+            self.assertIn("ID_SP_FB", loaded.prepared_spells)
+            self.assertTrue(any("ID_SKILL_ARC" in vals for vals in loaded.selections.values()))
+
+            # 2. Duplicate character name overwrite check
+            win = MainWindow(
+                repo, p, custom_dir=p / "c", templates_dir=p / "t",
+                config=AppConfig(characters_dir=str(p / "chars")),
+                config_path=p / "cfg.json", auto_sync=False,
+            )
+            win.state = CharacterState(name="Lyra")
+            self.assertTrue(win.save_character())
+            win.current_file = None
+            win.state = CharacterState(name="Lyra")
+            with mock.patch("aurora_borealis.ui.main_window.QMessageBox.warning") as mock_warn:
+                self.assertFalse(win.save_character())
+                self.assertTrue(mock_warn.called)
+
+            # 3. Equipment (Consumables) & Spell (School / Ritual) filters
+            win.cmb_equip_category.setCurrentText("Consumables")
+            self.assertEqual(win.tbl_equip_catalog.rowCount(), 1)
+            self.assertEqual(win.tbl_equip_catalog.item(0, 1).text(), "Potion of Healing")
+
+            win.cmb_spell_school.setCurrentText("Evocation")
+            self.assertEqual(win.tbl_spell_catalog.rowCount(), 1)
+            self.assertEqual(win.tbl_spell_catalog.item(0, 0).text(), "Fireball")
+            win.cmb_spell_school.setCurrentText("All Schools")
+            win.cmb_spell_prop.setCurrentText("Ritual")
+            self.assertEqual(win.tbl_spell_catalog.rowCount(), 1)
+            self.assertEqual(win.tbl_spell_catalog.item(0, 0).text(), "Identify")
+
+            # 4. Additional Content actions column scales width to buttons
+            win.github_view.set_installed_indexes([{
+                "slug": "core", "name": "Core", "url": "https://example.com/core.index",
+                "version": "1.0", "file_count": 10, "local_dir": str(p / "c" / "core"),
+            }])
+            self.assertGreaterEqual(win.github_view.tbl_indexes.columnWidth(4), 150)
+
+            # 5. Square portrait character cards + trash bin icon on delete button
+            win.refresh_library()
+            cards = [
+                win.select_view.grid.itemAt(i).widget()
+                for i in range(win.select_view.grid.count())
+                if isinstance(win.select_view.grid.itemAt(i).widget(), QFrame)
+            ]
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0].width(), cards[0].height())
+            trash_btns = [b for b in cards[0].findChildren(QPushButton) if b.objectName() == "TrashBtn"]
+            self.assertEqual(len(trash_btns), 1)
+            self.assertFalse(trash_btns[0].icon().isNull())
+
+            # 6. Magic / Infused Armor & Weapon dialog + AC calculation
+            from aurora_borealis.ui.dialogs import MagicGearDialog
+            plate = Element(id="ID_ARM_PLATE", name="Plate Armor", type="Armor", setters={"armor": "Heavy", "armorClass": "18"})
+            repo.by_id[plate.id] = plate
+            repo.by_type[plate.type].append(plate)
+            mg_dlg = MagicGearDialog(repo, initial_element=plate, parent=win)
+            mg_dlg.spn_bonus.setValue(2)
+            inv_magic = mg_dlg.build_inventory_item()
+            self.assertIsNotNone(inv_magic)
+            self.assertEqual(inv_magic.magic_bonus, 2)
+            self.assertEqual(inv_magic.category, "Armor")
+            win.state.inventory = [inv_magic]
+            comp_magic = win.engine.evaluate(win.state)
+            self.assertEqual(comp_magic.armor_class, 20)
+
+            # 7. XP spinbox + Attunement rules enforcement & override
+            win.spn_xp.setValue(6500)
+            self.assertEqual(win.state.xp, 6500)
+            from aurora_borealis.models import InventoryItem
+            win.state.inventory = [
+                InventoryItem(element_id=f"ID_ATT_{i}", name=f"Ring {i}", quantity=1, equipped=True, attuned=(i < 3), category="Magic Item")
+                for i in range(4)
+            ]
+            win.config.enforce_attunement = True
+            win._sync_equipment_tab()
+            cb4 = win.tbl_inventory.cellWidget(3, 4)
+            with mock.patch("aurora_borealis.ui.main_window.QMessageBox.information") as mock_info:
+                cb4.setChecked(True)
+                self.assertTrue(mock_info.called)
+                self.assertFalse(win.state.inventory[3].attuned)
+            # Disabling enforcement allows 4th attuned item
+            win.chk_enforce_attunement.setChecked(False)
+            cb4 = win.tbl_inventory.cellWidget(3, 4)
+            cb4.setChecked(True)
+            self.assertTrue(win.state.inventory[3].attuned)
+
+            win._dirty = False
+            win.current_file = p / "chars" / "done.dnd5e"
             win.close()
 
 

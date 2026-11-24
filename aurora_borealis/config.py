@@ -20,6 +20,9 @@ class AppConfig:
     installed_indexes: list[dict] = field(default_factory=list)
     favorites: list[str] = field(default_factory=list)
     auto_imported_official: bool = False
+    theme: str = "dark"
+    ui_scale: float = 1.0
+    enforce_attunement: bool = True
 
 
 def load_config(config_path: Path) -> AppConfig:
@@ -33,12 +36,21 @@ def load_config(config_path: Path) -> AppConfig:
     if not isinstance(raw, dict):
         return AppConfig()
 
+    try:
+        raw_scale = float(raw.get("ui_scale", 1.0))
+    except (TypeError, ValueError):
+        raw_scale = 1.0
+    ui_scale = max(0.85, min(1.5, raw_scale))
+
     return AppConfig(
         characters_dir=str(raw.get("characters_dir") or default_characters_dir()),
         custom_dirs=[str(x) for x in raw.get("custom_dirs", []) if x],
         installed_indexes=[dict(x) for x in raw.get("installed_indexes", []) if isinstance(x, dict)],
         favorites=[str(x) for x in raw.get("favorites", []) if x],
         auto_imported_official=bool(raw.get("auto_imported_official", False)),
+        theme="light" if str(raw.get("theme", "dark")).lower() == "light" else "dark",
+        ui_scale=ui_scale,
+        enforce_attunement=bool(raw.get("enforce_attunement", True)),
     )
 
 
