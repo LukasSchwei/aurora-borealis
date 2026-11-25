@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="800" height="400">
+  <defs>
+    
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1b1d23" />
+      <stop offset="100%" stop-color="#111216" />
+    </linearGradient>
+
+    
+    <linearGradient id="auroraGrad" x1="8%" y1="70%" x2="92%" y2="25%">
+      <stop offset="0%" stop-color="#00c882" />
+      <stop offset="32%" stop-color="#18cfb8" />
+      <stop offset="65%" stop-color="#35aae8" />
+      <stop offset="100%" stop-color="#7c82ff" />
+    </linearGradient>
+
+    
+    <linearGradient id="curtainColor" x1="8%" y1="70%" x2="92%" y2="25%">
+      <stop offset="0%" stop-color="#009e68" />
+      <stop offset="35%" stop-color="#14968c" />
+      <stop offset="65%" stop-color="#297ec4" />
+      <stop offset="100%" stop-color="#695eb8" />
+    </linearGradient>
+
+    
+    <linearGradient id="curtainFade" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.85" />
+      <stop offset="75%" stop-color="#ffffff" stop-opacity="0.55" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.35" />
+    </linearGradient>
+
+    <mask id="curtainMask">
+      <rect x="0" y="0" width="800" height="400" fill="url(#curtainFade)" />
+    </mask>
+
+    
+    <clipPath id="cardClip">
+      <rect x="10" y="10" width="780" height="380" rx="56" />
+    </clipPath>
+  </defs>
+
+  
+  <rect x="10" y="10" width="780" height="380" rx="56" fill="url(#bgGrad)" stroke="#31343e" stroke-width="10" />
+
+  <g clip-path="url(#cardClip)">
+    
+    <polygon points="400,58 523,129 523,271 400,342 277,271 277,129" fill="none" stroke="#ffffff" stroke-opacity="0.11" stroke-width="14" stroke-linejoin="miter" />
+
+    
+    <path d="M 75 290
+         C 135 185, 225 185, 315 205
+         S 470 195, 550 120
+         S 685 75, 735 115
+         L 735 235
+         C 680 195, 605 195, 540 245
+         C 465 305, 395 335, 305 315
+         C 220 295, 135 300, 75 358
+         Z" fill="url(#curtainColor)" mask="url(#curtainMask)" />
+  </g>
+
+  
+  <path d="M 75 290
+       C 135 185, 225 185, 315 205
+       S 470 195, 550 120
+       S 685 75, 735 115" fill="none" stroke="url(#auroraGrad)" stroke-width="50" stroke-linecap="round" />
+
+  
+  <path d="M 105 256
+       C 155 188, 232 187, 315 205
+       S 470 195, 550 120
+       S 672 80, 712 103" fill="none" stroke="#ffffff" stroke-opacity="0.42" stroke-width="12" stroke-linecap="round" />
+
+  
+  <path d="M 0 -38 Q 4 -4 38 0 Q 4 4 0 38 Q -4 4 -38 0 Q -4 -4 0 -38 Z" transform="translate(572, 102)" fill="#ffffff" />
+</svg>
