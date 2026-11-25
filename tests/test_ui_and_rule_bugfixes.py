@@ -819,30 +819,71 @@ class UiAndRuleBugfixTests(unittest.TestCase):
             proc = subprocess.run(["bash", "-n", str(root_dir / sh)], capture_output=True, text=True, check=False)
             self.assertEqual(proc.returncode, 0, proc.stderr)
 
-        # Windows setup wizard & uninstaller feature checks
+        # Windows setup wizard, installer & Inno Setup feature checks
         win_wiz_ps1 = (root_dir / "setup-wizard-windows.ps1").read_text(encoding="utf-8")
         self.assertIn("System.Windows.Forms", win_wiz_ps1)
         self.assertIn("install-windows.ps1", win_wiz_ps1)
         self.assertIn("uninstall-windows.ps1", win_wiz_ps1)
         self.assertIn("-PurgeConfig", win_wiz_ps1)
+        self.assertIn("-InstallAuroraLegacy", win_wiz_ps1)
+        self.assertIn("-InstallFiveTools", win_wiz_ps1)
         self.assertIn("Install / Repair Aurora Borealis", win_wiz_ps1)
         self.assertIn("Uninstall Aurora Borealis", win_wiz_ps1)
 
-        # Command builder checks
+        win_inst_ps1 = (root_dir / "install-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("$InstallAuroraLegacy", win_inst_ps1)
+        self.assertIn("$InstallFiveTools", win_inst_ps1)
+        self.assertIn("--sync-official", win_inst_ps1)
+        self.assertIn("--sync-5etools", win_inst_ps1)
+
+        inno_iss = (root_dir / "packaging" / "windows" / "aurora-borealis.iss").read_text(encoding="utf-8")
+        self.assertIn("auroralegacy", inno_iss)
+        self.assertIn("fivetools", inno_iss)
+        self.assertIn("--sync-official", inno_iss)
+        self.assertIn("--sync-5etools", inno_iss)
+
+        # Command builder & --help checks
+        help_proc = subprocess.run(["bash", str(root_dir / "install-linux.sh"), "--help"], capture_output=True, text=True, check=False)
+        self.assertEqual(help_proc.returncode, 0, help_proc.stderr)
+        self.assertIn("--install-aurora-legacy", help_proc.stdout)
+        self.assertIn("--install-5etools", help_proc.stdout)
+        self.assertIn("--gui", help_proc.stdout)
+
         in_cmd = build_install_command(root_dir, "/tmp/ab", in_place=False, install_system_deps=False, install_desktop=True)
         self.assertEqual(in_cmd[:2], ["bash", str(root_dir / "install-linux.sh")])
         self.assertIn("--prefix", in_cmd)
         self.assertIn("/tmp/ab", in_cmd)
         self.assertIn("--no-system-deps", in_cmd)
+        self.assertNotIn("--install-aurora-legacy", in_cmd)
+        self.assertNotIn("--install-5etools", in_cmd)
+
+        in_cmd_packs = build_install_command(
+            root_dir,
+            "/tmp/ab",
+            in_place=False,
+            install_system_deps=False,
+            install_desktop=True,
+            install_aurora_legacy=True,
+            install_5etools=True,
+        )
+        self.assertIn("--install-aurora-legacy", in_cmd_packs)
+        self.assertIn("--install-5etools", in_cmd_packs)
 
         un_cmd = build_uninstall_command(root_dir, "/tmp/ab", purge_config=True)
         self.assertEqual(un_cmd[:2], ["bash", str(root_dir / "uninstall-linux.sh")])
         self.assertIn("--purge-config", un_cmd)
 
-        # Qt Wizard offscreen instantiation & Install/Uninstall option switching
+        # Qt Wizard offscreen instantiation, content pack toggles & Install/Uninstall switching
         app = QApplication.instance() or QApplication([])
         dlg = build_qt_wizard_dialog(root_dir, initial_action="install", initial_prefix="/tmp/ab-test")
         self.assertFalse(dlg.is_uninstall_selected())
+        self.assertTrue(dlg.chk_aurora_legacy.isChecked())
+        self.assertTrue(dlg.chk_5etools.isChecked())
+        self.assertIn("--install-aurora-legacy", dlg.planned_command())
+        self.assertIn("--install-5etools", dlg.planned_command())
+        dlg.chk_5etools.setChecked(False)
+        self.assertIn("--install-aurora-legacy", dlg.planned_command())
+        self.assertNotIn("--install-5etools", dlg.planned_command())
         dlg.rad_uninstall.setChecked(True)
         dlg._go_to_page(1)
         app.processEvents()

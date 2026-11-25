@@ -3,7 +3,9 @@
     [switch]$InPlace,
     [switch]$CreateDesktopShortcut = $true,
     [switch]$RegisterFileAssociations = $true,
-    [switch]$SkipWinget
+    [switch]$SkipWinget,
+    [switch]$InstallAuroraLegacy,
+    [switch]$InstallFiveTools
 )
 
 $ErrorActionPreference = "Stop"
@@ -202,8 +204,22 @@ Set-ItemProperty -Path $UninstallKey -Name "InstallLocation" -Value $TargetDir
 Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\setup-wizard-windows.ps1`" -InitialAction Uninstall"
 if (Test-Path $IcoPath) { Set-ItemProperty -Path $UninstallKey -Name "DisplayIcon" -Value "$IcoPath,0" }
 
+$InstalledPacks = @()
+if ($InstallAuroraLegacy) {
+    Write-Host "[Content] Downloading & installing official Aurora Legacy content from GitHub..."
+    & $VenvPy -u -m aurora_borealis.main --sync-official
+    $InstalledPacks += "Aurora Legacy"
+}
+if ($InstallFiveTools) {
+    Write-Host "[Content] Downloading & converting 5e.tools D&D 5e/5.5e content from GitHub..."
+    & $VenvPy -u -m aurora_borealis.main --sync-5etools
+    $InstalledPacks += "5e.tools"
+}
+$PackSummary = if ($InstalledPacks.Count -gt 0) { $InstalledPacks -join ", " } else { "On-demand in app" }
+
 Write-Host ""
 Write-Host "Aurora Borealis setup complete!" -ForegroundColor Green
 Write-Host "  Installed in : $TargetDir"
 Write-Host "  Start Menu   : Aurora Borealis"
 Write-Host "  File Types   : .dnd5e, .dnd55e, .dndcomp"
+Write-Host "  Content Packs: $PackSummary"

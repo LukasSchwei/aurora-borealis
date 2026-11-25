@@ -30,13 +30,13 @@ Cross-platform (Linux & Windows) D&D 5e / 5.5e character builder written in Pyth
 
 ## Installing & Running on Linux
 
-Launch the graphical **Linux Setup Wizard** (supports both **Install / Repair** and **Uninstall** with directory picker, system dependency checks, desktop entry & `.dnd5e`/`.dnd55e`/`.dndcomp` file associations):
+Launch the graphical **Linux Setup Wizard** (supports both **Install / Repair** and **Uninstall**, directory picker, system dependency checks, optional **Aurora Legacy** & **5e.tools** content pack download during install, desktop entry & `.dnd5e`/`.dnd55e`/`.dndcomp` file associations):
 
 ```bash
 ./setup-wizard-linux.sh
 ```
 
-Or run the headless CLI installer directly:
+Or run the headless CLI installer directly (add `--install-aurora-legacy` and/or `--install-5etools` to pre-download content):
 
 ```bash
 ./install-linux.sh
@@ -62,9 +62,9 @@ To uninstall on Linux via CLI (keeps your characters in Documents; add `--purge-
 
 ## Installing & Running on Windows
 
-Double-click **`setup-wizard-windows.bat`** to launch the graphical **Windows Setup Wizard** (supports both **Install / Repair** and **Uninstall**, target directory picker, optional Desktop shortcut, `.dnd5e`/`.dnd55e`/`.dndcomp` associations, and automatic Python/7-Zip check via `winget`).
+Double-click **`setup-wizard-windows.bat`** to launch the graphical **Windows Setup Wizard** (supports both **Install / Repair** and **Uninstall**, target directory picker, optional **Aurora Legacy** & **5e.tools** content pack download during install, Desktop shortcut, `.dnd5e`/`.dnd55e`/`.dndcomp` associations, and automatic Python/7-Zip check via `winget`).
 
-Or double-click **`install-windows.bat`** (headless PowerShell installer) / run in PowerShell:
+Or double-click **`install-windows.bat`** (headless PowerShell installer) / run in PowerShell (with optional `-InstallAuroraLegacy` / `-InstallFiveTools`):
 
 ```powershell
 .\install-windows.ps1 -CreateDesktopShortcut -RegisterFileAssociations

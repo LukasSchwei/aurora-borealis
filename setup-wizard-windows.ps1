@@ -40,8 +40,8 @@ $DangerBg = [System.Drawing.Color]::FromArgb(127, 29, 29)
 
 $Form = New-Object System.Windows.Forms.Form
 $Form.Text = "Aurora Borealis — Windows Setup Wizard"
-$Form.Size = New-Object System.Drawing.Size(760, 560)
-$Form.MinimumSize = New-Object System.Drawing.Size(700, 500)
+$Form.Size = New-Object System.Drawing.Size(760, 620)
+$Form.MinimumSize = New-Object System.Drawing.Size(700, 560)
 $Form.StartPosition = "CenterScreen"
 $Form.BackColor = $BgDark
 $Form.ForeColor = $FgLight
@@ -195,7 +195,7 @@ $BtnBrowse.Add_Click({
 # Install checkboxes
 $InstallOptsPanel = New-Object System.Windows.Forms.Panel
 $InstallOptsPanel.Location = New-Object System.Drawing.Point(6, 92)
-$InstallOptsPanel.Size = New-Object System.Drawing.Size(670, 210)
+$InstallOptsPanel.Size = New-Object System.Drawing.Size(670, 310)
 
 $ChkInPlace = New-Object System.Windows.Forms.CheckBox
 $ChkInPlace.Text = "Install in-place inside the current folder instead of copying"
@@ -221,7 +221,26 @@ $ChkWinget.Checked = $true
 $ChkWinget.AutoSize = $true
 $ChkWinget.Location = New-Object System.Drawing.Point(0, 108)
 
-$InstallOptsPanel.Controls.AddRange(@($ChkInPlace, $ChkDesktop, $ChkAssoc, $ChkWinget))
+$GrpContentPacks = New-Object System.Windows.Forms.GroupBox
+$GrpContentPacks.Text = "D&D Content Packs (Download during Setup)"
+$GrpContentPacks.ForeColor = $FgLight
+$GrpContentPacks.Location = New-Object System.Drawing.Point(0, 146)
+$GrpContentPacks.Size = New-Object System.Drawing.Size(660, 108)
+
+$ChkAuroraLegacy = New-Object System.Windows.Forms.CheckBox
+$ChkAuroraLegacy.Text = "Install official Aurora Legacy content (PHB / SRD / Supplements from GitHub)"
+$ChkAuroraLegacy.Checked = $true
+$ChkAuroraLegacy.AutoSize = $true
+$ChkAuroraLegacy.Location = New-Object System.Drawing.Point(14, 28)
+
+$ChkFiveTools = New-Object System.Windows.Forms.CheckBox
+$ChkFiveTools.Text = "Install 5e.tools D&D 5e / 5.5e content (Classes, Spells, Items, Feats from GitHub)"
+$ChkFiveTools.Checked = $true
+$ChkFiveTools.AutoSize = $true
+$ChkFiveTools.Location = New-Object System.Drawing.Point(14, 62)
+
+$GrpContentPacks.Controls.AddRange(@($ChkAuroraLegacy, $ChkFiveTools))
+$InstallOptsPanel.Controls.AddRange(@($ChkInPlace, $ChkDesktop, $ChkAssoc, $ChkWinget, $GrpContentPacks))
 
 # Uninstall checkboxes
 $UninstallOptsPanel = New-Object System.Windows.Forms.Panel
@@ -265,7 +284,7 @@ $TxtLog.BackColor = $InputBg
 $TxtLog.ForeColor = $FgLight
 $TxtLog.Font = New-Object System.Drawing.Font("Consolas", 9.5)
 $TxtLog.Location = New-Object System.Drawing.Point(6, 66)
-$TxtLog.Size = New-Object System.Drawing.Size(680, 300)
+$TxtLog.Size = New-Object System.Drawing.Size(680, 360)
 $TxtLog.Anchor = "Top,Bottom,Left,Right"
 
 $Page2.Controls.AddRange(@($LblProg, $ProgBar, $TxtLog))
@@ -385,6 +404,8 @@ function Start-SetupProcess() {
         if ($ChkDesktop.Checked) { $argList += "-CreateDesktopShortcut" } else { $argList += "-CreateDesktopShortcut:`$false" }
         if ($ChkAssoc.Checked) { $argList += "-RegisterFileAssociations" } else { $argList += "-RegisterFileAssociations:`$false" }
         if (-not $ChkWinget.Checked) { $argList += "-SkipWinget" }
+        if ($ChkAuroraLegacy.Checked) { $argList += "-InstallAuroraLegacy" }
+        if ($ChkFiveTools.Checked) { $argList += "-InstallFiveTools" }
     }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -425,8 +446,12 @@ function Start-SetupProcess() {
                         $ChkLaunch.Checked = $false
                     } else {
                         $tgt = if ($ChkInPlace.Checked) { $ScriptDir } else { $TxtDir.Text.Trim() }
+                        $packs = @()
+                        if ($ChkAuroraLegacy.Checked) { $packs += "Aurora Legacy" }
+                        if ($ChkFiveTools.Checked) { $packs += "5e.tools" }
+                        $packInfo = if ($packs.Count -gt 0) { $packs -join ", " } else { "On-demand in app" }
                         $LblFinishTitle.Text = "Aurora Borealis Installation Complete"
-                        $LblFinishDesc.Text = "Installed in: $tgt`r`nStart Menu shortcut created and file associations updated."
+                        $LblFinishDesc.Text = "Installed in: $tgt`r`nStart Menu shortcut created and file associations updated.`r`nContent Packs: $packInfo"
                         $ChkLaunch.Visible = $true
                         $ChkLaunch.Checked = $true
                     }

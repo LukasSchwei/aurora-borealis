@@ -13,6 +13,8 @@ BIN_DIR="${HOME}/.local/bin"
 IN_PLACE=0
 INSTALL_SYSTEM_DEPS=1
 INSTALL_DESKTOP=1
+INSTALL_AURORA_LEGACY=0
+INSTALL_5ETOOLS=0
 ASSUME_YES=0
 
 usage() {
@@ -20,12 +22,15 @@ usage() {
 Usage: ./install-linux.sh [OPTIONS]
 
 Options:
-  --prefix DIR        Target installation directory (default: ~/.local/share/aurora-borealis/app)
-  --in-place          Create .venv directly in the repository folder instead of copying
-  --no-system-deps    Skip apt/dnf/pacman/zypper system package installation
-  --no-desktop        Skip .desktop, icon, and MIME association setup
-  --yes, -y           Run package manager / installer non-interactively
-  --help, -h          Show this help message
+  --prefix DIR             Target installation directory (default: ~/.local/share/aurora-borealis/app)
+  --in-place               Create .venv directly in the repository folder instead of copying
+  --no-system-deps         Skip apt/dnf/pacman/zypper system package installation
+  --no-desktop             Skip .desktop, icon, and MIME association setup
+  --install-aurora-legacy  Download & install official Aurora Legacy content from GitHub
+  --install-5etools        Download & convert 5e.tools D&D 5e/5.5e content from GitHub
+  --gui                    Launch the graphical Linux Setup Wizard instead
+  --yes, -y                Run package manager / installer non-interactively
+  --help, -h               Show this help message
 EOF
 }
 
@@ -46,6 +51,17 @@ while [ "$#" -gt 0 ]; do
         --no-desktop)
             INSTALL_DESKTOP=0
             shift
+            ;;
+        --install-aurora-legacy)
+            INSTALL_AURORA_LEGACY=1
+            shift
+            ;;
+        --install-5etools)
+            INSTALL_5ETOOLS=1
+            shift
+            ;;
+        --gui)
+            exec bash "${SCRIPT_DIR}/setup-wizard-linux.sh"
             ;;
         --yes|-y)
             ASSUME_YES=1
@@ -81,8 +97,12 @@ install_system_packages() {
 
     echo "[1/4] Checking/installing system packages (python3, venv, 7z, qpdf, Qt xcb deps)..."
     local sudo_cmd=""
-    if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-        sudo_cmd="sudo"
+    if [ "$(id -u)" -ne 0 ]; then
+        if [ ! -t 0 ] && command -v pkexec >/dev/null 2>&1; then
+            sudo_cmd="pkexec"
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo_cmd="sudo"
+        fi
     fi
 
     if command -v apt-get >/dev/null 2>&1; then
@@ -158,10 +178,28 @@ else
     echo "[4/4] Skipping desktop integration (--no-desktop)."
 fi
 
+INSTALLED_PACKS=""
+if [ "${INSTALL_AURORA_LEGACY}" -eq 1 ]; then
+    echo "[Content] Downloading & installing official Aurora Legacy content from GitHub..."
+    QT_QPA_PLATFORM=offscreen "${TARGET_DIR}/.venv/bin/python" -u -m aurora_borealis.main --sync-official
+    INSTALLED_PACKS="${INSTALLED_PACKS}Aurora Legacy"
+fi
+
+if [ "${INSTALL_5ETOOLS}" -eq 1 ]; then
+    echo "[Content] Downloading & converting 5e.tools D&D 5e/5.5e content from GitHub..."
+    QT_QPA_PLATFORM=offscreen "${TARGET_DIR}/.venv/bin/python" -u -m aurora_borealis.main --sync-5etools
+    if [ -n "${INSTALLED_PACKS}" ]; then
+        INSTALLED_PACKS="${INSTALLED_PACKS}, 5e.tools"
+    else
+        INSTALLED_PACKS="5e.tools"
+    fi
+fi
+
 cat <<EOF
 
 Aurora Borealis installation complete!
   App directory : ${TARGET_DIR}
   CLI launcher  : ${BIN_DIR}/aurora-borealis
+  Content packs : ${INSTALLED_PACKS:-On-demand in app}
   Run now       : aurora-borealis  (or "${TARGET_DIR}/aurora-borealis")
 EOF

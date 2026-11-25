@@ -29,6 +29,8 @@ Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "assoc"; Description: "Register .dnd5e, .dnd55e, and .dndcomp file associations"; GroupDescription: "File Associations"
+Name: "auroralegacy"; Description: "Download && install official Aurora Legacy content (GitHub)"; GroupDescription: "D&D Content Packs"
+Name: "fivetools"; Description: "Download && install 5e.tools D&D 5e / 5.5e content (GitHub)"; GroupDescription: "D&D Content Packs"
 
 [Files]
 Source: "..\..\dist\AuroraBorealis\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -47,4 +49,6 @@ Root: HKA; Subkey: "Software\Classes\AuroraBorealisFile\DefaultIcon"; ValueType:
 Root: HKA; Subkey: "Software\Classes\AuroraBorealisFile\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" --open ""%1"""; Tasks: assoc
 
 [Run]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--sync-official"; StatusMsg: "Downloading official Aurora Legacy content..."; Flags: runhidden waituntilterminated; Tasks: auroralegacy
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--sync-5etools"; StatusMsg: "Downloading & converting 5e.tools content..."; Flags: runhidden waituntilterminated; Tasks: fivetools
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

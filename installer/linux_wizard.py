@@ -81,6 +81,8 @@ def build_install_command(
     install_system_deps: bool,
     install_desktop: bool,
     assume_yes: bool = True,
+    install_aurora_legacy: bool = False,
+    install_5etools: bool = False,
 ) -> list[str]:
     """Build the bash command list to run install-linux.sh."""
     cmd = ["bash", str(Path(script_dir) / "install-linux.sh")]
@@ -92,6 +94,10 @@ def build_install_command(
         cmd.append("--no-system-deps")
     if not install_desktop:
         cmd.append("--no-desktop")
+    if install_aurora_legacy:
+        cmd.append("--install-aurora-legacy")
+    if install_5etools:
+        cmd.append("--install-5etools")
     if assume_yes:
         cmd.append("--yes")
     return cmd
@@ -231,7 +237,7 @@ def build_qt_wizard_dialog(
             icon_path = self.script_dir / "aurora_borealis" / "assets" / "aurora-borealis.svg"
             if icon_path.is_file():
                 self.setWindowIcon(QIcon(str(icon_path)))
-            self.resize(780, 560)
+            self.resize(800, 620)
             self.setStyleSheet(_QT_WIZARD_STYLESHEET)
             self._build_ui()
             self._ensure_buttons_fit()
@@ -365,6 +371,21 @@ def build_qt_wizard_dialog(
             inl.addWidget(self.chk_in_place)
             inl.addWidget(self.chk_sys_deps)
             inl.addWidget(self.chk_desktop)
+
+            packs_grp = QGroupBox("D&D Content Packs (Download during Setup)")
+            pgl = QVBoxLayout(packs_grp)
+            pgl.setSpacing(6)
+            self.chk_aurora_legacy = QCheckBox(
+                "Install official Aurora Legacy content (PHB / SRD / Supplements from GitHub)"
+            )
+            self.chk_aurora_legacy.setChecked(True)
+            self.chk_5etools = QCheckBox(
+                "Install 5e.tools D&D 5e / 5.5e content (Classes, Spells, Items, Feats from GitHub)"
+            )
+            self.chk_5etools.setChecked(True)
+            pgl.addWidget(self.chk_aurora_legacy)
+            pgl.addWidget(self.chk_5etools)
+            inl.addWidget(packs_grp)
             inl.addStretch()
 
             # Uninstall options
@@ -485,6 +506,24 @@ def build_qt_wizard_dialog(
             elif cur == 1:
                 self._start_execution()
 
+        def planned_command(self) -> list[str]:
+            if self.is_uninstall_selected():
+                return build_uninstall_command(
+                    self.script_dir,
+                    self.txt_un_prefix.text(),
+                    self.chk_purge_config.isChecked(),
+                )
+            return build_install_command(
+                self.script_dir,
+                self.txt_prefix.text(),
+                self.chk_in_place.isChecked(),
+                self.chk_sys_deps.isChecked(),
+                self.chk_desktop.isChecked(),
+                assume_yes=True,
+                install_aurora_legacy=self.chk_aurora_legacy.isChecked(),
+                install_5etools=self.chk_5etools.isChecked(),
+            )
+
         def _start_execution(self) -> None:
             self._go_to_page(2)
             self.txt_log.clear()
@@ -492,21 +531,9 @@ def build_qt_wizard_dialog(
             un = self.is_uninstall_selected()
             if un:
                 self.lbl_prog.setText("Uninstalling Aurora Borealis…")
-                cmd = build_uninstall_command(
-                    self.script_dir,
-                    self.txt_un_prefix.text(),
-                    self.chk_purge_config.isChecked(),
-                )
             else:
-                self.lbl_prog.setText("Installing Aurora Borealis (setting up venv & dependencies)…")
-                cmd = build_install_command(
-                    self.script_dir,
-                    self.txt_prefix.text(),
-                    self.chk_in_place.isChecked(),
-                    self.chk_sys_deps.isChecked(),
-                    self.chk_desktop.isChecked(),
-                    assume_yes=True,
-                )
+                self.lbl_prog.setText("Installing Aurora Borealis (setting up venv, dependencies & content)…")
+            cmd = self.planned_command()
             self._last_cmd = cmd
             self.txt_log.appendPlainText("$ " + shlex.join(cmd))
             proc = QProcess(self)
@@ -540,9 +567,18 @@ def build_qt_wizard_dialog(
                     self.chk_launch.setChecked(False)
                 else:
                     target = str(self.script_dir) if self.chk_in_place.isChecked() else self.txt_prefix.text().strip()
+                    packs: list[str] = []
+                    if self.chk_aurora_legacy.isChecked():
+                        packs.append("Aurora Legacy")
+                    if self.chk_5etools.isChecked():
+                        packs.append("5e.tools")
+                    pack_txt = ", ".join(packs) if packs else "On-demand in app"
                     self.lbl_finish_title.setText("✓ Aurora Borealis Installation Complete")
                     self.lbl_finish_desc.setText(
-                        f"Installed in: {target}\nCLI command: aurora-borealis\nFile types registered: .dnd5e, .dnd55e, .dndcomp"
+                        f"Installed in: {target}\n"
+                        f"CLI command: aurora-borealis\n"
+                        f"Content packs: {pack_txt}\n"
+                        f"File types registered: .dnd5e, .dnd55e, .dndcomp"
                     )
                     self.chk_launch.setVisible(True)
                     self.chk_launch.setChecked(True)
@@ -591,7 +627,7 @@ def _launch_tk_wizard(
     status_info = detect_linux_installation()
     root = tk.Tk()
     root.title("Aurora Borealis — Linux Setup Wizard")
-    root.geometry("760x540")
+    root.geometry("780x580")
     root.configure(bg="#0e0f11")
 
     style = ttk.Style(root)
@@ -610,6 +646,8 @@ def _launch_tk_wizard(
     in_place_var = tk.BooleanVar(value=False)
     sys_deps_var = tk.BooleanVar(value=True)
     desktop_var = tk.BooleanVar(value=True)
+    aurora_legacy_var = tk.BooleanVar(value=True)
+    fivetools_var = tk.BooleanVar(value=True)
     purge_var = tk.BooleanVar(value=False)
     launch_var = tk.BooleanVar(value=True)
 
@@ -670,6 +708,9 @@ def _launch_tk_wizard(
                 ttk.Checkbutton(body, text="Install in-place in current folder", variable=in_place_var).pack(anchor="w", pady=3)
                 ttk.Checkbutton(body, text="Install missing system dependencies (apt/dnf/pacman/zypper)", variable=sys_deps_var).pack(anchor="w", pady=3)
                 ttk.Checkbutton(body, text="Install desktop entry, icon & MIME associations", variable=desktop_var).pack(anchor="w", pady=3)
+                ttk.Label(body, text="D&D Content Packs (Download during Setup):", foreground="#34d399").pack(anchor="w", pady=(10, 3))
+                ttk.Checkbutton(body, text="Install official Aurora Legacy content (GitHub)", variable=aurora_legacy_var).pack(anchor="w", padx=14, pady=2)
+                ttk.Checkbutton(body, text="Install 5e.tools D&D 5e / 5.5e content (GitHub)", variable=fivetools_var).pack(anchor="w", padx=14, pady=2)
             else:
                 ttk.Label(body, text="Saved characters in ~/Documents will be preserved.").pack(anchor="w", pady=(0, 6))
                 ttk.Checkbutton(body, text="Also delete config & downloaded XML caches", variable=purge_var).pack(anchor="w", pady=3)
@@ -697,6 +738,8 @@ def _launch_tk_wizard(
                     sys_deps_var.get(),
                     desktop_var.get(),
                     assume_yes=True,
+                    install_aurora_legacy=aurora_legacy_var.get(),
+                    install_5etools=fivetools_var.get(),
                 )
             )
             log.insert("end", "$ " + shlex.join(cmd) + "\n")
@@ -778,6 +821,8 @@ def run_cli_wizard(
         in_place = False
         sys_deps = True
         desktop = True
+        aurora_legacy = True
+        fivetools = True
         if not non_interactive:
             in_p = input(f"Install folder [{prefix}] (or 'in-place'): ").strip()
             if in_p == "in-place":
@@ -786,7 +831,18 @@ def run_cli_wizard(
                 prefix = in_p
             sys_deps = input("Install system dependencies if missing? [Y/n]: ").strip().lower() not in ("n", "no")
             desktop = input("Install desktop shortcut & MIME associations? [Y/n]: ").strip().lower() not in ("n", "no")
-        cmd = build_install_command(script_dir, prefix, in_place, sys_deps, desktop, assume_yes=non_interactive)
+            aurora_legacy = input("Install official Aurora Legacy content? [Y/n]: ").strip().lower() not in ("n", "no")
+            fivetools = input("Install 5e.tools 5e/5.5e content? [Y/n]: ").strip().lower() not in ("n", "no")
+        cmd = build_install_command(
+            script_dir,
+            prefix,
+            in_place,
+            sys_deps,
+            desktop,
+            assume_yes=non_interactive,
+            install_aurora_legacy=aurora_legacy,
+            install_5etools=fivetools,
+        )
 
     print("Running:", shlex.join(cmd))
     return subprocess.run(cmd, check=False).returncode

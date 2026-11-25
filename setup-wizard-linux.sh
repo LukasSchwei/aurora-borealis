@@ -23,7 +23,20 @@ elif command -v zenity >/dev/null 2>&1 && { [ -n "${DISPLAY:-}" ] || [ -n "${WAY
         FALSE "Uninstall Aurora Borealis" || true)
     case "${CHOICE}" in
         Install*)
-            exec bash "${SCRIPT_DIR}/install-linux.sh" -y
+            PACKS=$(zenity --list --checklist \
+                --title="D&D Content Packs" \
+                --text="Select content packs to install during setup:" \
+                --column="Install" --column="Content Pack" \
+                TRUE "Aurora Legacy (official PHB / SRD / Supplements)" \
+                TRUE "5e.tools (D&D 5e / 5.5e data)" || true)
+            EXTRA_FLAGS=()
+            case "${PACKS}" in
+                *Aurora*) EXTRA_FLAGS+=("--install-aurora-legacy") ;;
+            esac
+            case "${PACKS}" in
+                *5e.tools*) EXTRA_FLAGS+=("--install-5etools") ;;
+            esac
+            exec bash "${SCRIPT_DIR}/install-linux.sh" -y "${EXTRA_FLAGS[@]}"
             ;;
         Uninstall*)
             exec bash "${SCRIPT_DIR}/uninstall-linux.sh"
