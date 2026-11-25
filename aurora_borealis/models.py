@@ -212,6 +212,10 @@ class CharacterState:
     known_spells: list[str] = field(default_factory=list)
     prepared_spells: list[str] = field(default_factory=list)
     allow_extra_spells: bool = False
+    manual_save_profs: list[str] = field(default_factory=list)
+    manual_skill_profs: list[str] = field(default_factory=list)
+    manual_skill_expertise: list[str] = field(default_factory=list)
+    manual_proficiencies: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.classes:

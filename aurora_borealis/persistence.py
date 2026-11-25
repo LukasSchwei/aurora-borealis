@@ -278,6 +278,23 @@ def save_dnd5e(
         for cdata in state.companions:
             etree.SubElement(comp_node, "companion").text = json.dumps(cdata, ensure_ascii=False)
 
+    # Manual Proficiency Overrides
+    if (
+        state.manual_save_profs
+        or state.manual_skill_profs
+        or state.manual_skill_expertise
+        or state.manual_proficiencies
+    ):
+        mp_node = etree.SubElement(build, "manual-proficiencies")
+        for ab in state.manual_save_profs:
+            etree.SubElement(mp_node, "save").text = ab
+        for sk in state.manual_skill_profs:
+            etree.SubElement(mp_node, "skill").text = sk
+        for sk in state.manual_skill_expertise:
+            etree.SubElement(mp_node, "expertise").text = sk
+        for pr in state.manual_proficiencies:
+            etree.SubElement(mp_node, "proficiency").text = pr
+
     xml_bytes = etree.tostring(root, encoding="utf-8", xml_declaration=True, pretty_print=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(xml_bytes)
@@ -623,5 +640,20 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                         state.companions.append(obj)
                 except Exception:
                     pass
+
+    mp_node = build.find("manual-proficiencies")
+    if mp_node is not None:
+        state.manual_save_profs = [
+            (n.text or "").strip() for n in mp_node.findall("save") if (n.text or "").strip()
+        ]
+        state.manual_skill_profs = [
+            (n.text or "").strip() for n in mp_node.findall("skill") if (n.text or "").strip()
+        ]
+        state.manual_skill_expertise = [
+            (n.text or "").strip() for n in mp_node.findall("expertise") if (n.text or "").strip()
+        ]
+        state.manual_proficiencies = [
+            (n.text or "").strip() for n in mp_node.findall("proficiency") if (n.text or "").strip()
+        ]
 
     return state

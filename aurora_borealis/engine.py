@@ -23,6 +23,7 @@ from .models import (
     SkillValue,
     SpellcastingInfo,
     SpellcastingSummary,
+    StatRule,
 )
 from .rules_55e import (
     WEAPON_MASTERY_DESCRIPTIONS,
@@ -34,6 +35,164 @@ from .rules_55e import (
     get_weapon_mastery,
     monk_martial_arts_die_55e,
 )
+
+# Standard 5e / 5.5e XP thresholds by character level (1..20)
+XP_THRESHOLDS: dict[int, int] = {
+    1: 0,
+    2: 300,
+    3: 900,
+    4: 2700,
+    5: 6500,
+    6: 14000,
+    7: 23000,
+    8: 34000,
+    9: 48000,
+    10: 64000,
+    11: 85000,
+    12: 100000,
+    13: 120000,
+    14: 140000,
+    15: 165000,
+    16: 195000,
+    17: 225000,
+    18: 265000,
+    19: 305000,
+    20: 355000,
+}
+
+
+def xp_for_level(level: int) -> int:
+    """Return the minimum XP threshold for a D&D level (1..20)."""
+    clamped = max(1, min(20, int(level or 1)))
+    return XP_THRESHOLDS[clamped]
+
+
+def level_for_xp(xp: int) -> int:
+    """Return the character level (1..20) corresponding to total XP."""
+    xp_val = max(0, int(xp or 0))
+    lvl = 1
+    for candidate_lvl, threshold in XP_THRESHOLDS.items():
+        if xp_val >= threshold:
+            lvl = candidate_lvl
+    return lvl
+
+
+def sync_xp_to_level(state: CharacterState) -> None:
+    """Keep state.xp inside the active level's XP bracket [T(lvl), T(lvl+1)-1]."""
+    lvl = max(1, min(20, int(state.level or 1)))
+    cur_xp = max(0, int(state.xp or 0))
+    low = XP_THRESHOLDS[lvl]
+    high = XP_THRESHOLDS.get(lvl + 1)
+    if cur_xp < low or (high is not None and cur_xp >= high):
+        state.xp = low
+
+
+SYNTHETIC_ASI_PREFIX = "ID_AURORA_ASI_"
+
+
+def is_synthetic_asi_id(eid: str) -> bool:
+    """Return True if eid identifies a built-in synthetic ASI option."""
+    return bool(eid and eid.startswith(SYNTHETIC_ASI_PREFIX))
+
+
+def is_asi_select_rule(sel: SelectRule) -> bool:
+    """Return True if sel represents an Ability Score Improvement selection."""
+    stype = (sel.type or "").strip().lower()
+    sname = (sel.name or "").strip().lower()
+    ssupp = (sel.supports or "").strip().lower()
+    return (
+        stype == "ability score improvement"
+        or "ability score improvement" in sname
+        or "improvement option" in ssupp
+    )
+
+
+def _build_synthetic_asi_catalog() -> tuple[dict[str, Element], list[Element], list[Element]]:
+    plus1_list: list[Element] = []
+    plus2_list: list[Element] = []
+    pair_list: list[Element] = []
+
+    for ab in ABILITIES:
+        ab_title = ab.title()
+        plus1_list.append(
+            Element(
+                id=f"ID_AURORA_ASI_PLUS1_{ab.upper()}",
+                name=f"Ability Score Increase: {ab_title} +1",
+                type="Ability Score Improvement",
+                source="Core Rules (Built-in)",
+                description_html=(
+                    f"<p>Increase your <b>{ab_title}</b> score by <b>1</b> "
+                    "(up to 20, or higher with the ASI cap rule override).</p>"
+                ),
+                stat_rules=[StatRule(name=ab, value="1")],
+            )
+        )
+        plus2_list.append(
+            Element(
+                id=f"ID_AURORA_ASI_PLUS2_{ab.upper()}",
+                name=f"Ability Score Improvement: {ab_title} +2",
+                type="Ability Score Improvement",
+                source="Core Rules (Built-in)",
+                description_html=(
+                    f"<p>Increase your <b>{ab_title}</b> score by <b>2</b> "
+                    "(up to 20, or higher with the ASI cap rule override).</p>"
+                ),
+                stat_rules=[StatRule(name=ab, value="2")],
+            )
+        )
+
+    for i in range(len(ABILITIES)):
+        for j in range(i + 1, len(ABILITIES)):
+            ab_a = ABILITIES[i]
+            ab_b = ABILITIES[j]
+            pair_list.append(
+                Element(
+                    id=f"ID_AURORA_ASI_PLUS1_{ab_a.upper()}_{ab_b.upper()}",
+                    name=f"Ability Score Improvement: {ab_a.title()} +1, {ab_b.title()} +1",
+                    type="Ability Score Improvement",
+                    source="Core Rules (Built-in)",
+                    description_html=(
+                        f"<p>Increase your <b>{ab_a.title()}</b> and <b>{ab_b.title()}</b> scores "
+                        "by <b>1</b> each (up to 20, or higher with the ASI cap rule override).</p>"
+                    ),
+                    stat_rules=[StatRule(name=ab_a, value="1"), StatRule(name=ab_b, value="1")],
+                )
+            )
+
+    full_list = [*plus2_list, *pair_list]
+    by_id = {e.id: e for e in [*plus1_list, *full_list]}
+    return by_id, plus1_list, full_list
+
+
+_SYNTHETIC_ASI_BY_ID, _SYNTHETIC_ASI_PLUS1, _SYNTHETIC_ASI_FULL = _build_synthetic_asi_catalog()
+
+
+def get_synthetic_asi_element(eid: str) -> Optional[Element]:
+    """Return the built-in synthetic ASI Element for eid, or None."""
+    return _SYNTHETIC_ASI_BY_ID.get(eid)
+
+
+def _synthetic_asi_options(
+    repo: ContentRepository, number: int, supports_expr: str = ""
+) -> list[tuple[str, str]]:
+    if number >= 2:
+        return [(e.id, e.name) for e in _SYNTHETIC_ASI_PLUS1]
+    opts: list[tuple[str, str]] = [(e.id, e.name) for e in _SYNTHETIC_ASI_FULL]
+    if "!feat" not in (supports_expr or "").lower():
+        for f in repo.of_type("Feat"):
+            opts.append((f.id, f"Feat: {f.name}"))
+    return opts
+
+
+def _class_asi_levels(class_el: Optional[Element]) -> tuple[int, ...]:
+    if class_el is not None:
+        cname = class_el.name.lower()
+        if "fighter" in cname:
+            return (4, 6, 8, 12, 14, 16, 19)
+        if "rogue" in cname:
+            return (4, 8, 10, 12, 16, 19)
+    return (4, 8, 12, 16, 19)
+
 
 # Standard 5e full-caster spell slot table (levels 1..20 -> slot level 1..9)
 FULL_CASTER_SLOTS: dict[int, dict[int, int]] = {
@@ -646,6 +805,35 @@ class RulesEngine:
 
         active_selections: list[ActiveSelection] = []
         seen_select_keys: set[str] = set()
+        seen_asi_levels: set[tuple[str, int]] = set()
+
+        def add_synthetic_asi(
+            cid: str,
+            sel_key: str,
+            slot_idx: int,
+            owner: Optional[tuple[str, int, bool]],
+        ) -> bool:
+            syn_el = get_synthetic_asi_element(cid)
+            if syn_el is None:
+                return False
+            slot_eid = f"{cid}::{sel_key}::{slot_idx}"
+            if slot_eid in seen_elements:
+                return False
+            seen_elements.add(slot_eid)
+            granted_ids.add(slot_eid)
+            ordered_elements.append(
+                Element(
+                    id=slot_eid,
+                    name=syn_el.name,
+                    type=syn_el.type,
+                    source=syn_el.source,
+                    description_html=syn_el.description_html,
+                    stat_rules=list(syn_el.stat_rules),
+                )
+            )
+            if owner is not None:
+                element_owners[slot_eid] = owner
+            return True
 
         def process_rules_for_element(
             source_id: str,
@@ -686,6 +874,14 @@ class RulesEngine:
                     child_owner = owner_tuple
                 if target_el is not None and target_el.type == "Spell" and owner_tuple is not None:
                     spell_grant_owners[g.id] = (owner_tuple[0], el_type)
+                if (
+                    owner_tuple is not None
+                    and target_el is not None
+                    and ("ability_score_improvement" in g.id.lower() or "ability score improvement" in target_el.name.lower())
+                ):
+                    asi_sels = [s for s in target_el.select_rules if is_asi_select_rule(s)]
+                    if len(asi_sels) == 1 and asi_sels[0].level <= 1:
+                        seen_asi_levels.add((owner_tuple[0], g.level))
                 if g.id not in seen_elements:
                     granted_ids.add(g.id)
                     add_element(g.id, owner=child_owner)
@@ -709,11 +905,9 @@ class RulesEngine:
                 ):
                     continue
 
-                # Skip XML ASI select if already resolved via Level-Up Wizard
-                if owner_tuple is not None and (
-                    sel.type == "Ability Score Improvement"
-                    or "ability score improvement" in sel.name.lower()
-                ):
+                # Track & skip XML ASI select if already resolved via Level-Up Wizard
+                if owner_tuple is not None and is_asi_select_rule(sel):
+                    seen_asi_levels.add((owner_tuple[0], sel.level))
                     asi_key = f"{owner_tuple[0]}::{sel.level}"
                     if asi_key in state.level_up_asi or asi_key in state.level_up_feats:
                         continue
@@ -738,7 +932,10 @@ class RulesEngine:
                                 ruleset=state.ruleset,
                             )
                         matches = self.repo.find_matching(sel.type, supports_expr)
-                        options = [(m.id, m.name) for m in matches]
+                        if not matches and is_asi_select_rule(sel):
+                            options = _synthetic_asi_options(self.repo, sel.number, supports_expr)
+                        else:
+                            options = [(m.id, m.name) for m in matches]
                     active_selections.append(
                         ActiveSelection(
                             key=key,
@@ -749,8 +946,14 @@ class RulesEngine:
                         )
                     )
                 chosen = state.selections.get(key, [])
-                for cid in chosen[: sel.number]:
-                    if cid and sel.type != "List" and cid not in seen_elements:
+                for slot_idx, cid in enumerate(chosen[: sel.number]):
+                    if not cid or sel.type == "List":
+                        continue
+                    if is_synthetic_asi_id(cid):
+                        if add_synthetic_asi(cid, key, slot_idx, owner_tuple):
+                            local_changed = True
+                        continue
+                    if cid not in seen_elements:
                         target_el = self.repo.get(cid)
                         child_owner = None
                         if owner_tuple is not None and target_el is not None and target_el.type in (
@@ -821,6 +1024,62 @@ class RulesEngine:
                         changed = True
             if not changed:
                 break
+
+        # Fallback ASI selections for classes whose XML omits ASI <select> rules (e.g. 5e.tools imports)
+        for idx_c, cl in enumerate(class_entries):
+            cel = self.repo.get(cl.class_id)
+            cname = cel.name if cel else cl.class_id
+            c_owner = (cl.class_id, cl.level, idx_c == 0)
+            for asi_lvl in _class_asi_levels(cel):
+                if asi_lvl > cl.level:
+                    continue
+                if (cl.class_id, asi_lvl) in seen_asi_levels:
+                    continue
+                asi_key_l = f"{cl.class_id}::{asi_lvl}"
+                if asi_key_l in state.level_up_asi or asi_key_l in state.level_up_feats:
+                    continue
+                syn_key = self.selection_key(
+                    cl.class_id,
+                    "Ability Score Improvement",
+                    f"Ability Score Improvement (Level {asi_lvl})",
+                    asi_lvl,
+                    0,
+                )
+                if syn_key not in seen_select_keys:
+                    seen_select_keys.add(syn_key)
+                    active_selections.append(
+                        ActiveSelection(
+                            key=syn_key,
+                            rule=SelectRule(
+                                type="Ability Score Improvement",
+                                name=f"Ability Score Improvement (Level {asi_lvl})",
+                                number=1,
+                                level=asi_lvl,
+                                optional=False,
+                            ),
+                            source_element_id=cl.class_id,
+                            source_element_name=cname,
+                            options=_synthetic_asi_options(self.repo, 1, ""),
+                        )
+                    )
+                for slot_idx, cid in enumerate(state.selections.get(syn_key, [])[:1]):
+                    if not cid:
+                        continue
+                    if is_synthetic_asi_id(cid):
+                        add_synthetic_asi(cid, syn_key, slot_idx, c_owner)
+                    elif cid not in seen_elements:
+                        add_element(cid)
+                        chosen_el = self.repo.get(cid)
+                        if chosen_el is not None:
+                            process_rules_for_element(
+                                chosen_el.id,
+                                chosen_el.name,
+                                chosen_el.type,
+                                chosen_el.grant_rules,
+                                chosen_el.select_rules,
+                                total_level,
+                                None,
+                            )
 
         if state.ruleset == "5.5e":
             origin_key = self.selection_key("5.5e::Origin", "Feat", "Origin Feat (5.5e)", 1, 0)
@@ -1095,7 +1354,12 @@ class RulesEngine:
         ability_modifiers: dict[str, int] = {}
         for ab in ABILITIES:
             bonus = int(round(stats.get(ab, 0.0)))
-            total = int(state.abilities.get(ab, 10)) + bonus
+            raw_total = int(state.abilities.get(ab, 10)) + bonus
+            if state.has_override("override_asi_cap"):
+                total = max(1, min(30, raw_total))
+            else:
+                cap = max(20, int(round(stats.get(f"{ab}:max", 20.0))))
+                total = max(1, min(cap, raw_total))
             ability_bonuses[ab] = bonus
             ability_totals[ab] = total
             ability_modifiers[ab] = ability_modifier(total)
@@ -1208,12 +1472,21 @@ class RulesEngine:
             speed = max(0, speed + spd_pen)
 
         # Saving Throws
+        ov_profs = state.has_override("override_proficiencies")
+        manual_saves = {s.lower() for s in state.manual_save_profs} if ov_profs else set()
+        manual_skills = {s.lower() for s in state.manual_skill_profs} if ov_profs else set()
+        manual_exp = {s.lower() for s in state.manual_skill_expertise} if ov_profs else set()
+
         saving_throws: dict[str, SavingThrowValue] = {}
         for ab in ABILITIES:
             save_id = f"ID_PROFICIENCY_SAVINGTHROW_{ab.upper()}"
-            prof = save_id in granted_ids or any(
-                e.type == "Proficiency" and f"{ab} saving throw" in e.name.lower()
-                for e in elements
+            prof = (
+                save_id in granted_ids
+                or ab.lower() in manual_saves
+                or any(
+                    e.type == "Proficiency" and f"{ab} saving throw" in e.name.lower()
+                    for e in elements
+                )
             )
             bonus = ability_modifiers[ab] + (proficiency_bonus if prof else 0) + exhaustion_d20_penalty
             saving_throws[ab] = SavingThrowValue(ability=ab, bonus=bonus, proficient=prof)
@@ -1237,14 +1510,21 @@ class RulesEngine:
         }
         for skill_name, ab in SKILLS:
             skill_id = SKILL_ID_MAP[skill_name]
-            prof = skill_id in granted_ids or any(
-                e.type == "Proficiency" and e.name.lower() == f"skill ({skill_name.lower()})"
-                for e in elements
-            )
+            sk_lower = skill_name.lower()
             expertise = (
-                f"expertise ({skill_name.lower()})" in expertise_names
-                or f"{skill_name.lower()} expertise" in expertise_names
+                sk_lower in manual_exp
+                or f"expertise ({sk_lower})" in expertise_names
+                or f"{sk_lower} expertise" in expertise_names
                 or f"ID_INTERNAL_EXPERTISE_SKILL_{skill_name.upper().replace(' ', '_')}" in granted_ids
+            )
+            prof = (
+                expertise
+                or sk_lower in manual_skills
+                or skill_id in granted_ids
+                or any(
+                    e.type == "Proficiency" and e.name.lower() == f"skill ({sk_lower})"
+                    for e in elements
+                )
             )
             mult = 2 if (prof and expertise) else (1 if prof else 0)
             bonus = (
@@ -1264,15 +1544,16 @@ class RulesEngine:
         passive_perception = 10 + skills["Perception"].bonus
 
         # Proficiencies & Languages
-        proficiencies = sorted(
-            {
-                e.name
-                for e in elements
-                if e.type == "Proficiency"
-                and not e.id.startswith("ID_PROFICIENCY_SKILL_")
-                and not e.id.startswith("ID_PROFICIENCY_SAVINGTHROW_")
-            }
-        )
+        prof_set = {
+            e.name
+            for e in elements
+            if e.type == "Proficiency"
+            and not e.id.startswith("ID_PROFICIENCY_SKILL_")
+            and not e.id.startswith("ID_PROFICIENCY_SAVINGTHROW_")
+        }
+        if ov_profs:
+            prof_set.update(p for p in state.manual_proficiencies if p)
+        proficiencies = sorted(prof_set)
         languages = sorted({e.name for e in elements if e.type == "Language"})
 
         # Spellcasting (Single-class, Subclass 1/3-caster & extensions, and Multiclass)
@@ -1553,6 +1834,10 @@ class RulesEngine:
             if max_cantrips == 0 and "paladin" not in cname_l and "ranger" not in cname_l:
                 if caster_type == "third":
                     max_cantrips = 3 if cls_lvl >= 10 else (2 if cls_lvl >= 3 else 0)
+                elif "sorcerer" in cname_l:
+                    max_cantrips = 6 if cls_lvl >= 10 else (5 if cls_lvl >= 4 else 4)
+                elif any(k in cname_l for k in ("wizard", "cleric")):
+                    max_cantrips = 5 if cls_lvl >= 10 else (4 if cls_lvl >= 4 else 3)
                 else:
                     max_cantrips = 4 if cls_lvl >= 10 else (3 if cls_lvl >= 4 else 2)
             if state.ruleset == "5.5e":

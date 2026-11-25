@@ -17,8 +17,9 @@ from .fivetools_importer import import_5etools_directory, import_5etools_from_gi
 from .github_importer import install_official_aurora_content
 from .loader import ContentRepository
 from .paths import get_config_path, get_custom_dir, get_elements_dir, get_templates_dir
-from .platform_utils import configure_windows_app_id
+from .platform_utils import configure_windows_app_id, is_windows
 from .ui.main_window import MainWindow
+from .ui.ui_helpers import install_global_wheel_filter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MSI_PATH = PROJECT_ROOT / "Aurora Setup.msi"
@@ -130,6 +131,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         repo.load_directory(Path(cdir))
 
     app = QApplication.instance() or QApplication(sys.argv)
+    if is_windows():
+        app.setStyle("Fusion")
+    install_global_wheel_filter(app)
     app.setApplicationName("Aurora Borealis")
     icon_path = Path(__file__).resolve().parent / "assets" / "aurora-borealis.svg"
     if icon_path.is_file():

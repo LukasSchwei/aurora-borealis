@@ -85,6 +85,8 @@ if ($InPlace) {
         "install-windows.ps1",
         "install-windows.bat",
         "uninstall-windows.ps1",
+        "setup-wizard-windows.ps1",
+        "setup-wizard-windows.bat",
         "pyproject.toml",
         "requirements.txt",
         "README.md"
@@ -147,6 +149,16 @@ if (Test-Path $IcoPath) { $StartShortcut.IconLocation = "$IcoPath,0" }
 $StartShortcut.Save()
 Write-Host "Created Start Menu shortcut in $StartMenuDir"
 
+$WizardLauncher = Join-Path $TargetDir "setup-wizard-windows.bat"
+if (Test-Path $WizardLauncher) {
+    $WizShortcut = $WshShell.CreateShortcut((Join-Path $StartMenuDir "Aurora Borealis Setup Wizard.lnk"))
+    $WizShortcut.TargetPath = $WizardLauncher
+    $WizShortcut.WorkingDirectory = $TargetDir
+    $WizShortcut.Description = "Install, Repair, or Uninstall Aurora Borealis"
+    if (Test-Path $IcoPath) { $WizShortcut.IconLocation = "$IcoPath,0" }
+    $WizShortcut.Save()
+}
+
 if ($CreateDesktopShortcut) {
     $DesktopDir = [Environment]::GetFolderPath("Desktop")
     $DeskShortcut = $WshShell.CreateShortcut((Join-Path $DesktopDir "Aurora Borealis.lnk"))
@@ -187,7 +199,7 @@ Set-ItemProperty -Path $UninstallKey -Name "DisplayName" -Value "Aurora Borealis
 Set-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value "0.2.0"
 Set-ItemProperty -Path $UninstallKey -Name "Publisher" -Value "Aurora Borealis"
 Set-ItemProperty -Path $UninstallKey -Name "InstallLocation" -Value $TargetDir
-Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$TargetDir\uninstall-windows.ps1`""
+Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\setup-wizard-windows.ps1`" -InitialAction Uninstall"
 if (Test-Path $IcoPath) { Set-ItemProperty -Path $UninstallKey -Name "DisplayIcon" -Value "$IcoPath,0" }
 
 Write-Host ""

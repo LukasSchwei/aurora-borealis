@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import functools
+from pathlib import Path
+
+_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+
 _DARK_TOKENS = {
     "bg": "#0e0f11",
     "titlebar": "#131417",
@@ -71,8 +76,11 @@ _LIGHT_TOKENS = {
 }
 
 
-def _build_stylesheet(t: dict[str, str], scale: float = 1.0) -> str:
+def _build_stylesheet(t: dict[str, str], scale: float = 1.0, is_light: bool = False) -> str:
     s = max(0.85, min(1.5, float(scale)))
+    suffix = "dark" if is_light else "light"
+    up_svg = (_ASSETS_DIR / f"chevron-up-{suffix}.svg").as_posix()
+    down_svg = (_ASSETS_DIR / f"chevron-down-{suffix}.svg").as_posix()
 
     def pt(val: float) -> str:
         return f"{val * s:.1f}pt"
@@ -303,6 +311,79 @@ QTableWidget {{
     gridline-color: {t["border_subtle"]};
     alternate-background-color: {t["card_elev"]};
 }}
+QRadioButton, QCheckBox {{
+    spacing: {px(8)};
+    background-color: transparent;
+}}
+QRadioButton::indicator {{
+    width: {px(16)};
+    height: {px(16)};
+    border-radius: {px(9)};
+    border: 1.5px solid {t["text_dim"]};
+    background-color: {t["input"]};
+}}
+QRadioButton::indicator:hover {{
+    border-color: {t["accent"]};
+}}
+QRadioButton::indicator:checked {{
+    border: 1.5px solid {t["accent"]};
+    background-color: qradialgradient(
+        cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+        stop: 0 {t["accent"]},
+        stop: 0.44 {t["accent"]},
+        stop: 0.48 {t["input"]},
+        stop: 1 {t["input"]}
+    );
+}}
+QCheckBox::indicator {{
+    width: {px(15)};
+    height: {px(15)};
+    border-radius: {px(4)};
+    border: 1.5px solid {t["text_dim"]};
+    background-color: {t["input"]};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {t["accent"]};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {t["accent"]};
+    border-color: {t["accent"]};
+}}
+QSpinBox[buttonSymbols="0"] {{
+    padding: {px(4)} {px(22)} {px(4)} {px(8)};
+    min-height: {px(26)};
+}}
+QSpinBox[buttonSymbols="0"]::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: {px(18)};
+    border: none;
+    border-left: 1px solid {t["border_subtle"]};
+    border-top-right-radius: {px(8)};
+    background-color: transparent;
+}}
+QSpinBox[buttonSymbols="0"]::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: {px(18)};
+    border: none;
+    border-left: 1px solid {t["border_subtle"]};
+    border-bottom-right-radius: {px(8)};
+    background-color: transparent;
+}}
+QSpinBox[buttonSymbols="0"]::up-button:hover, QSpinBox[buttonSymbols="0"]::down-button:hover {{
+    background-color: {t["btn_hover"]};
+}}
+QSpinBox[buttonSymbols="0"]::up-arrow {{
+    image: url("{up_svg}");
+    width: {px(9)};
+    height: {px(6)};
+}}
+QSpinBox[buttonSymbols="0"]::down-arrow {{
+    image: url("{down_svg}");
+    width: {px(9)};
+    height: {px(6)};
+}}
 QSpinBox#StepperSpin {{
     padding: {px(2)} {px(4)};
     min-height: {px(26)};
@@ -318,15 +399,33 @@ QSpinBox QLineEdit {{
     padding: 0px;
     background: transparent;
 }}
+QComboBox {{
+    combobox-popup: 0;
+    padding-right: {px(26)};
+}}
 QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
     border: none;
-    width: {px(26)};
+    width: {px(24)};
+}}
+QComboBox::down-arrow {{
+    image: url("{down_svg}");
+    width: {px(10)};
+    height: {px(6)};
 }}
 QComboBox QAbstractItemView {{
     background-color: {t["card"]};
     border: 1px solid {t["border"]};
+    border-radius: {px(8)};
+    padding: {px(4)};
+    outline: 0;
     selection-background-color: {t["btn_hover"]};
     selection-color: {t["text"]};
+}}
+QComboBox QAbstractItemView::item {{
+    min-height: {px(24)};
+    padding: {px(4)} {px(8)};
 }}
 
 /* Buttons (Chubby Google Material Pill style) */
@@ -544,10 +643,17 @@ QSplitter::handle {{
 """
 
 
-DARK_STYLESHEET = _build_stylesheet(_DARK_TOKENS, 1.0)
-LIGHT_STYLESHEET = _build_stylesheet(_LIGHT_TOKENS, 1.0)
+DARK_STYLESHEET = _build_stylesheet(_DARK_TOKENS, 1.0, is_light=False)
+LIGHT_STYLESHEET = _build_stylesheet(_LIGHT_TOKENS, 1.0, is_light=True)
+
+
+@functools.lru_cache(maxsize=32)
+def _cached_stylesheet(is_light: bool, scale_pct: int) -> str:
+    tokens = _LIGHT_TOKENS if is_light else _DARK_TOKENS
+    return _build_stylesheet(tokens, scale_pct / 100.0, is_light=is_light)
 
 
 def get_stylesheet(theme: str = "dark", scale: float = 1.0) -> str:
-    tokens = _LIGHT_TOKENS if str(theme).lower() == "light" else _DARK_TOKENS
-    return _build_stylesheet(tokens, scale)
+    is_light = str(theme).lower() == "light"
+    scale_pct = max(85, min(150, round(float(scale) * 100)))
+    return _cached_stylesheet(is_light, scale_pct)

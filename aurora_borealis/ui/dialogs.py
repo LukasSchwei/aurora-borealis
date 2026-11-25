@@ -44,6 +44,7 @@ from ..models import ABILITIES, ABILITY_ABBR, CharacterState, Element
 from ..loader import ContentRepository
 from ..models import DuplicateEntry, Element, InventoryItem
 from ..persistence import encode_portrait_file
+from .ui_helpers import ensure_widgets_fit
 
 
 _PORTRAIT_PIXMAP_CACHE: dict[tuple[str, str, int], QPixmap] = {}
@@ -146,6 +147,7 @@ class NewCharacterDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        ensure_widgets_fit(self)
 
     def _pick_portrait(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -217,6 +219,7 @@ class DuplicateReportDialog(QDialog):
         layout.addWidget(buttons)
 
         self._populate()
+        ensure_widgets_fit(self)
 
     def _populate(self) -> None:
         filter_type = self.cmb_type.currentData() or ""
@@ -332,8 +335,10 @@ class MagicGearDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        ensure_widgets_fit(self)
 
         self._refresh_base_list(initial_id=initial_element.id if initial_element else "")
+        ensure_widgets_fit(self)
 
     def _refresh_base_list(self, _idx: int = 0, initial_id: str = "") -> None:
         q = self.txt_search.text().strip()
@@ -440,6 +445,16 @@ RULE_OVERRIDE_SPECS: list[tuple[str, str, str]] = [
         "Bypass the standard ability score cap of 20 during character customization.",
     ),
     (
+        "override_point_buy",
+        "Override Point Buy Limit (27 pts / 8–15 Base Scores)",
+        "Allow rolled or custom base ability scores outside the standard 27-point Point Buy budget.",
+    ),
+    (
+        "override_proficiencies",
+        "Enable Manual Proficiency Overrides",
+        "Manually toggle Saving Throw / Skill proficiencies, Expertise, and add custom Armor/Weapon/Tool proficiencies.",
+    ),
+    (
         "override_heavy_weapon_req",
         "Ignore 5.5e Heavy Weapon STR/DEX 13 Requirement",
         "Suppress warnings/restrictions when wielding Heavy weapons below 13 STR/DEX.",
@@ -503,6 +518,7 @@ class RuleOverridesDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        ensure_widgets_fit(self)
 
     def _set_all(self, val: bool) -> None:
         for chk in self._checkboxes.values():
@@ -655,6 +671,7 @@ class CustomAnimalFormDialog(QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        ensure_widgets_fit(self)
 
     def _on_accept(self) -> None:
         if not self.txt_name.text().strip():

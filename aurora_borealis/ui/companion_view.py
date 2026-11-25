@@ -46,6 +46,7 @@ from ..companions import (
 from ..models import ABILITIES, ABILITY_ABBR, SKILLS
 from ..persistence import encode_portrait_file
 from .dialogs import pixmap_from_portrait
+from .ui_helpers import ensure_widgets_fit
 
 
 def _fmt_mod(val: int) -> str:
@@ -116,13 +117,14 @@ class CompanionEditorView(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_left_rail())
         splitter.addWidget(self._build_right_tabs())
-        splitter.setSizes([310, 1020])
+        splitter.setSizes([340, 1020])
         root.addWidget(splitter, 1)
+        ensure_widgets_fit(self)
 
     def _build_left_rail(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(285)
-        panel.setMaximumWidth(360)
+        panel.setMinimumWidth(320)
+        panel.setMaximumWidth(420)
         vl = QVBoxLayout(panel)
         vl.setContentsMargins(10, 10, 6, 10)
         vl.setSpacing(8)

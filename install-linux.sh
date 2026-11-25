@@ -127,7 +127,7 @@ else
     TARGET_DIR="${INSTALL_DIR}"
     echo "[2/4] Copying Aurora Borealis files to ${TARGET_DIR}..."
     mkdir -p "${TARGET_DIR}"
-    for item in aurora_borealis aurora-borealis aurora-borealis.bat aurora-borealis.ps1 install-desktop.sh install-linux.sh uninstall-linux.sh pyproject.toml requirements.txt README.md; do
+    for item in aurora_borealis installer aurora-borealis aurora-borealis.bat aurora-borealis.ps1 install-desktop.sh install-linux.sh uninstall-linux.sh setup-wizard-linux.sh pyproject.toml requirements.txt README.md; do
         if [ -e "${SCRIPT_DIR}/${item}" ]; then
             rm -rf "${TARGET_DIR}/${item}"
             cp -R "${SCRIPT_DIR}/${item}" "${TARGET_DIR}/${item}"
@@ -136,7 +136,7 @@ else
     find "${TARGET_DIR}/aurora_borealis" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 fi
 
-chmod +x "${TARGET_DIR}/aurora-borealis" "${TARGET_DIR}/install-desktop.sh" 2>/dev/null || true
+chmod +x "${TARGET_DIR}/aurora-borealis" "${TARGET_DIR}/install-desktop.sh" "${TARGET_DIR}/setup-wizard-linux.sh" "${TARGET_DIR}/uninstall-linux.sh" 2>/dev/null || true
 
 echo "[3/4] Creating Python virtual environment and installing dependencies..."
 python3 -m venv "${TARGET_DIR}/.venv"

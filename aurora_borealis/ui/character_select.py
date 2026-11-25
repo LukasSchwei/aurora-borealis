@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..library import CharacterSummary
 from .dialogs import pixmap_from_portrait
+from .ui_helpers import ensure_widgets_fit, fit_button
 
 
 class _ClickableCard(QFrame):
@@ -55,6 +56,11 @@ class CharacterSelectView(QWidget):
         self._filter_mode = "all"
         self._ui_scale: float = 1.0
         self._last_cols: int = 4
+        self._cards: list[QWidget] = []
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(50)
+        self._resize_timer.timeout.connect(self._relayout_cards)
         self._trash_icon_path = Path(__file__).resolve().parent.parent / "assets" / "trash-bin.svg"  # "all" or "fav"
         self._build_ui()
 
@@ -155,6 +161,7 @@ class CharacterSelectView(QWidget):
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.scroll_area.setWidget(self.grid_host)
         root.addWidget(self.scroll_area, 1)
+        ensure_widgets_fit(self)
 
     def set_header_info(
         self,
@@ -169,6 +176,7 @@ class CharacterSelectView(QWidget):
             f"Character Library • {element_count} loaded elements{dup_part}"
         )
         self.btn_github.setText(f"Additional Content (GitHub: {index_count})")
+        fit_button(self.btn_github)
 
     def set_characters(self, summaries: list[CharacterSummary]) -> None:
         self._summaries = list(summaries)
@@ -177,6 +185,9 @@ class CharacterSelectView(QWidget):
         self.btn_all.setText(f"All ({len(summaries)})")
         self.btn_fav.setText(f"★ Favorites ({fav_count})")
         self.btn_comp.setText(f"🐾 Companions ({comp_count})")
+        fit_button(self.btn_all)
+        fit_button(self.btn_fav)
+        fit_button(self.btn_comp)
         self._render_cards()
 
     def _set_filter(self, mode: str) -> None:
@@ -190,11 +201,14 @@ class CharacterSelectView(QWidget):
         self._render_cards()
 
     def set_ui_scale(self, scale: float) -> None:
-        self._ui_scale = max(0.85, min(1.5, float(scale)))
+        clamped = max(0.85, min(1.5, float(scale)))
+        if abs(clamped - self._ui_scale) < 1e-4:
+            return
+        self._ui_scale = clamped
         self._render_cards()
 
     def _card_size(self) -> int:
-        return round(250 * self._ui_scale)
+        return round(284 * self._ui_scale)
 
     def _compute_columns(self) -> int:
         card_sz = self._card_size()
@@ -208,15 +222,32 @@ class CharacterSelectView(QWidget):
         super().resizeEvent(event)
         cols = self._compute_columns()
         if cols != self._last_cols:
-            self._render_cards()
+            self._resize_timer.start()
+
+    def _relayout_cards(self) -> None:
+        cols = self._compute_columns()
+        if cols == self._last_cols and self.grid.count() == len(self._cards):
+            return
+        self._last_cols = cols
+        self.grid_host.setUpdatesEnabled(False)
+        while self.grid.count():
+            self.grid.takeAt(0)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        for idx, card in enumerate(self._cards):
+            r, c = divmod(idx, cols)
+            self.grid.addWidget(card, r, c)
+        ensure_widgets_fit(self.grid_host)
+        self.grid_host.setUpdatesEnabled(True)
 
     def _render_cards(self) -> None:
+        self.grid_host.setUpdatesEnabled(False)
         while self.grid.count():
             item = self.grid.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.hide()
                 w.deleteLater()
+        self._cards.clear()
 
         q = self.txt_search.text().strip().lower()
         filtered: list[CharacterSummary] = []
@@ -234,18 +265,22 @@ class CharacterSelectView(QWidget):
         self._last_cols = cols
         self.grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-        for idx, summary in enumerate(filtered):
-            r, c = divmod(idx, cols)
-            self.grid.addWidget(self._make_card(summary, card_sz), r, c)
+        for summary in filtered:
+            self._cards.append(self._make_card(summary, card_sz))
 
         # Dashed "+ Create New Character" square card at the end
-        r_new, c_new = divmod(len(filtered), cols)
         new_btn = QPushButton("+\n\nNew Character\n5e / 5.5e")
         new_btn.setObjectName("NewCharDashedCard")
         new_btn.setFixedSize(card_sz, card_sz)
         new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         new_btn.clicked.connect(self.new_character_requested.emit)
-        self.grid.addWidget(new_btn, r_new, c_new)
+        self._cards.append(new_btn)
+
+        for idx, card in enumerate(self._cards):
+            r, c = divmod(idx, cols)
+            self.grid.addWidget(card, r, c)
+        ensure_widgets_fit(self.grid_host)
+        self.grid_host.setUpdatesEnabled(True)
 
     def _make_card(self, s: CharacterSummary, card_sz: int) -> QFrame:
         is_comp = s.entry_kind == "companion"

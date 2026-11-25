@@ -13,6 +13,7 @@ from PySide6.QtCore import QPointF, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -70,13 +71,18 @@ from ..engine import (
     RulesEngine,
     check_multiclass_prerequisites,
     class_display_summary,
+    get_synthetic_asi_element,
     is_spell_concentration,
     is_spell_eligible_for_caster,
     is_spell_ritual,
+    is_synthetic_asi_id,
+    level_for_xp,
     parse_hit_die,
     parse_weight_lb,
     spell_classes,
     spell_school,
+    sync_xp_to_level,
+    xp_for_level,
 )
 from ..extractor import extract_msi_assets
 from ..library import delete_character, duplicate_character, scan_characters_folder
@@ -118,6 +124,7 @@ from .dialogs import (
 from .github_view import GitHubContentView
 from .level_up_wizard import LevelUpWizardDialog
 from .styles import DARK_STYLESHEET, LIGHT_STYLESHEET, get_stylesheet
+from .ui_helpers import configure_dropdown_combo, ensure_widgets_fit, fit_button, install_global_wheel_filter
 
 POINT_BUY_COSTS = {8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9}
 
@@ -417,6 +424,8 @@ class _CatalogSelectorTab(QWidget):
         cl_outer = QVBoxLayout(self.choices_group)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.choices_scroll = scroll
         self.choices_container = QWidget()
         self.choices_layout = QVBoxLayout(self.choices_container)
         self.choices_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -726,6 +735,13 @@ class MainWindow(QMainWindow):
         self._choices_sig: Optional[tuple] = None
         self._spell_catalog_sig: Optional[tuple] = None
         self._equip_catalog_sig: Optional[tuple] = None
+        self._last_resize_edge: Qt.Edge = Qt.Edge(0)
+        self._select_view_scale_dirty: bool = False
+        self._pending_scale_persist: bool = False
+        self._scale_timer = QTimer(self)
+        self._scale_timer.setSingleShot(True)
+        self._scale_timer.setInterval(90)
+        self._scale_timer.timeout.connect(self._apply_deferred_scale)
 
         # Start new character with NOTHING pre-selected
         self.state = CharacterState()
@@ -744,11 +760,14 @@ class MainWindow(QMainWindow):
         self._icon_path = Path(__file__).resolve().parent.parent / "assets" / "aurora-borealis.svg"
         if self._icon_path.is_file():
             self.setWindowIcon(QIcon(str(self._icon_path)))
-        self.resize(1420, 920)
+        install_global_wheel_filter(QApplication.instance())
+        self.resize(1520, 940)
 
         self._build_shortcuts()
         self._build_screens()
-        self.apply_theme(self.config.theme, persist=False)
+        self.config.theme = "light" if str(self.config.theme).lower() == "light" else "dark"
+        if hasattr(self, "title_bar"):
+            self.title_bar.set_theme_icon(self.config.theme)
         self.apply_scale(self.config.ui_scale, persist=False)
 
         self.refresh_library()
@@ -837,6 +856,7 @@ class MainWindow(QMainWindow):
         self.screen_stack.addWidget(self.github_view)
         self.screen_stack.addWidget(self.builder_view)
         self.screen_stack.addWidget(self.companion_view)
+        ensure_widgets_fit(self)
         self._update_status_summary()
 
     def apply_theme(self, theme: str, persist: bool = True) -> None:
@@ -854,7 +874,16 @@ class MainWindow(QMainWindow):
 
     def _step_scale(self, delta: float) -> None:
         new_scale = round(max(0.85, min(1.5, self.config.ui_scale + delta)), 2)
-        self.apply_scale(new_scale, persist=True)
+        self.config.ui_scale = new_scale
+        if hasattr(self, "title_bar"):
+            self.title_bar.set_scale_value(new_scale)
+        self._pending_scale_persist = True
+        self._scale_timer.start()
+
+    def _apply_deferred_scale(self) -> None:
+        persist = self._pending_scale_persist
+        self._pending_scale_persist = False
+        self.apply_scale(self.config.ui_scale, persist=persist)
 
     def _edge_at(self, pos) -> Qt.Edge:
         margin = 6
@@ -882,34 +911,117 @@ class MainWindow(QMainWindow):
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         if not self.isMaximized():
             edges = self._edge_at(event.position().toPoint())
-            if edges in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge):
-                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-            elif edges in (Qt.Edge.RightEdge | Qt.Edge.TopEdge, Qt.Edge.LeftEdge | Qt.Edge.BottomEdge):
-                self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-            elif edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge):
-                self.setCursor(Qt.CursorShape.SizeHorCursor)
-            elif edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge):
-                self.setCursor(Qt.CursorShape.SizeVerCursor)
-            else:
-                self.unsetCursor()
+            if edges != self._last_resize_edge:
+                self._last_resize_edge = edges
+                if edges in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge):
+                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                elif edges in (Qt.Edge.RightEdge | Qt.Edge.TopEdge, Qt.Edge.LeftEdge | Qt.Edge.BottomEdge):
+                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                elif edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge):
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                elif edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge):
+                    self.setCursor(Qt.CursorShape.SizeVerCursor)
+                else:
+                    self.unsetCursor()
+        elif self._last_resize_edge:
+            self._last_resize_edge = Qt.Edge(0)
+            self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def apply_scale(self, scale: float, persist: bool = True) -> None:
-        clamped = max(0.85, min(1.5, float(scale)))
+        clamped = round(max(0.85, min(1.5, float(scale))), 2)
         self.config.ui_scale = clamped
-        self.setStyleSheet(get_stylesheet(self.config.theme, clamped))
-        if hasattr(self, "title_bar"):
-            self.title_bar.set_scale_value(clamped)
-            self.title_bar.setFixedHeight(max(40, round(46 * clamped)))
-        if hasattr(self, "select_view") and hasattr(self.select_view, "set_ui_scale"):
-            self.select_view.set_ui_scale(clamped)
+        self.setUpdatesEnabled(False)
+        try:
+            self.setStyleSheet(get_stylesheet(self.config.theme, clamped))
+            if hasattr(self, "title_bar"):
+                self.title_bar.set_scale_value(clamped)
+                self.title_bar.setFixedHeight(max(40, round(46 * clamped)))
+            self._rescale_fixed_widgets(clamped)
+            if hasattr(self, "select_view") and hasattr(self.select_view, "set_ui_scale"):
+                if self.screen_stack.currentWidget() is self.select_view:
+                    self.select_view.set_ui_scale(clamped)
+                    self._select_view_scale_dirty = False
+                else:
+                    self._select_view_scale_dirty = True
+        finally:
+            self.setUpdatesEnabled(True)
         if persist:
             save_config(self.config, self.config_path)
+
+    def _rescale_fixed_widgets(self, s: float) -> None:
+        if hasattr(self, "sidebar_panel"):
+            self.sidebar_panel.setMinimumWidth(round(265 * s))
+            self.sidebar_panel.setMaximumWidth(round(340 * s))
+        if hasattr(self, "spn_level"):
+            self.spn_level.setFixedWidth(max(68, round(68 * s)))
+        if hasattr(self, "ab_spinboxes"):
+            ab_w = max(68, round(68 * s))
+            for spn in self.ab_spinboxes.values():
+                spn.setFixedWidth(ab_w)
+        if hasattr(self, "spn_exhaustion"):
+            self.spn_exhaustion.setFixedWidth(max(84, round(84 * s)))
+        if hasattr(self, "spn_xp"):
+            self.spn_xp.setFixedWidth(max(132, round(132 * s)))
+
+        row_h = max(22, round(22 * s))
+        hdr_h = max(24, round(24 * s))
+        if hasattr(self, "tbl_saves"):
+            sh = self.tbl_saves.horizontalHeader()
+            sh.setMinimumHeight(hdr_h)
+            sh.setFixedHeight(hdr_h)
+            self.tbl_saves.setColumnWidth(1, round(58 * s))
+            self.tbl_saves.setColumnWidth(2, round(68 * s))
+            vh = self.tbl_saves.verticalHeader()
+            vh.setMinimumSectionSize(row_h)
+            vh.setDefaultSectionSize(row_h)
+            for r in range(6):
+                self.tbl_saves.setRowHeight(r, row_h)
+            self.tbl_saves.setFixedHeight(hdr_h + 6 * row_h + 2 * self.tbl_saves.frameWidth() + 2)
+        if hasattr(self, "tbl_skills"):
+            kh = self.tbl_skills.horizontalHeader()
+            kh.setMinimumHeight(hdr_h)
+            kh.setFixedHeight(hdr_h)
+            self.tbl_skills.setColumnWidth(1, round(54 * s))
+            self.tbl_skills.setColumnWidth(2, round(66 * s))
+            self.tbl_skills.setColumnWidth(3, round(68 * s))
+            kvh = self.tbl_skills.verticalHeader()
+            kvh.setMinimumSectionSize(row_h)
+            kvh.setDefaultSectionSize(row_h)
+            for r in range(18):
+                self.tbl_skills.setRowHeight(r, row_h)
+            self.tbl_skills.setFixedHeight(hdr_h + 18 * row_h + 2 * self.tbl_skills.frameWidth() + 2)
+
+        if hasattr(self, "tbl_spell_catalog"):
+            self.tbl_spell_catalog.verticalHeader().setDefaultSectionSize(max(30, round(34 * s)))
+            self.tbl_spell_catalog.setColumnWidth(1, round(68 * s))
+            self.tbl_spell_catalog.setColumnWidth(2, round(138 * s))
+            self.tbl_spell_catalog.setColumnWidth(3, round(76 * s))
+        if hasattr(self, "tbl_equip_catalog"):
+            self.tbl_equip_catalog.verticalHeader().setDefaultSectionSize(max(32, round(36 * s)))
+            self.tbl_equip_catalog.setColumnWidth(0, round(54 * s))
+            self.tbl_equip_catalog.setColumnWidth(2, round(98 * s))
+            self.tbl_equip_catalog.setColumnWidth(3, round(78 * s))
+            self.tbl_equip_catalog.setColumnWidth(4, round(88 * s))
+        if hasattr(self, "tbl_hp_rolls"):
+            self.tbl_hp_rolls.setColumnWidth(0, round(50 * s))
+            self.tbl_hp_rolls.setColumnWidth(2, round(62 * s))
+            self.tbl_hp_rolls.setColumnWidth(3, round(196 * s))
+            self.tbl_hp_rolls.setColumnWidth(4, round(62 * s))
+            self.tbl_hp_rolls.setColumnWidth(5, round(72 * s))
+            if self.tbl_hp_rolls.isVisible():
+                self._sync_hp_panel()
+        if hasattr(self, "tab_bar_scroll"):
+            self.tab_bar_scroll.setFixedHeight(max(44, round(46 * s)))
+        ensure_widgets_fit(self)
 
     def show_character_select(self) -> None:
         if not self.confirm_leave_character():
             return
         self.refresh_library()
+        if self._select_view_scale_dirty and hasattr(self.select_view, "set_ui_scale"):
+            self.select_view.set_ui_scale(self.config.ui_scale)
+            self._select_view_scale_dirty = False
         self.screen_stack.setCurrentWidget(self.select_view)
         self.title_bar.set_breadcrumb("Character Library")
 
@@ -1041,7 +1153,7 @@ class MainWindow(QMainWindow):
         self.spn_level.setRange(1, 20)
         self.spn_level.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.spn_level.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.spn_level.setFixedWidth(56)
+        self.spn_level.setFixedWidth(68)
         self.spn_level.valueChanged.connect(self._on_level_changed)
         btn_lvl_p = QPushButton("+")
         btn_lvl_p.setObjectName("StepperBtn")
@@ -1100,14 +1212,22 @@ class MainWindow(QMainWindow):
         asi_layout.addLayout(mode_row)
 
         pick_row = QHBoxLayout()
-        pick_row.addWidget(QLabel("+2:"))
+        pick_row.setSpacing(6)
+        lbl_p2 = QLabel("+2:")
+        lbl_p2.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.cmb_asi_plus2 = QComboBox()
+        configure_dropdown_combo(self.cmb_asi_plus2, max_visible=10)
         self.cmb_asi_plus2.currentIndexChanged.connect(self._on_bg_asi_combo_changed)
-        pick_row.addWidget(self.cmb_asi_plus2)
-        pick_row.addWidget(QLabel("+1:"))
+        lbl_p1 = QLabel("+1:")
+        lbl_p1.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.cmb_asi_plus1 = QComboBox()
+        configure_dropdown_combo(self.cmb_asi_plus1, max_visible=10)
         self.cmb_asi_plus1.currentIndexChanged.connect(self._on_bg_asi_combo_changed)
-        pick_row.addWidget(self.cmb_asi_plus1)
+        pick_row.addWidget(lbl_p2)
+        pick_row.addWidget(self.cmb_asi_plus2, 1)
+        pick_row.addSpacing(12)
+        pick_row.addWidget(lbl_p1)
+        pick_row.addWidget(self.cmb_asi_plus1, 1)
         asi_layout.addLayout(pick_row)
         self.lbl_bg_asi_summary = QLabel("")
         self.lbl_bg_asi_summary.setObjectName("MutedText")
@@ -1143,7 +1263,14 @@ class MainWindow(QMainWindow):
             self.nav_buttons.append(btn)
             tab_layout.addWidget(btn)
         tab_layout.addStretch()
-        root_layout.addWidget(tab_bar)
+        self.tab_bar_scroll = QScrollArea()
+        self.tab_bar_scroll.setWidgetResizable(True)
+        self.tab_bar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.tab_bar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tab_bar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.tab_bar_scroll.setWidget(tab_bar)
+        self.tab_bar_scroll.setFixedHeight(max(44, tab_bar.sizeHint().height() + 4))
+        root_layout.addWidget(self.tab_bar_scroll)
 
         body = QSplitter(Qt.Orientation.Horizontal)
         body.addWidget(self._build_sidebar())
@@ -1158,9 +1285,11 @@ class MainWindow(QMainWindow):
             btn.setProperty("active", i == index)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
+            fit_button(btn)
 
     def _build_sidebar(self) -> QWidget:
         panel = QWidget()
+        self.sidebar_panel = panel
         panel.setMinimumWidth(265)
         panel.setMaximumWidth(340)
         layout = QVBoxLayout(panel)
@@ -1233,7 +1362,7 @@ class MainWindow(QMainWindow):
             name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             val_lbl = QLabel("10 (+0)")
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            val_lbl.setStyleSheet("font-weight:bold; font-size:10.5pt;")
+            val_lbl.setStyleSheet("font-weight:bold;")
             box.addWidget(name_lbl)
             box.addWidget(val_lbl)
             ab_grid.addLayout(box, r, c)
@@ -1259,6 +1388,12 @@ class MainWindow(QMainWindow):
     # Tab 0: Overview (Clickable summary cards)
     # ------------------------------------------------------------------
     def _build_tab_overview(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.overview_scroll = scroll
+
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -1296,7 +1431,7 @@ class MainWindow(QMainWindow):
         self.spn_xp = QSpinBox()
         self.spn_xp.setRange(0, 999999)
         self.spn_xp.setSingleStep(100)
-        self.spn_xp.setFixedWidth(120)
+        self.spn_xp.setFixedWidth(132)
         self.spn_xp.valueChanged.connect(self._on_xp_changed)
         lvl_row.addWidget(self.spn_xp)
         lvl_row.addStretch()
@@ -1322,6 +1457,7 @@ class MainWindow(QMainWindow):
         self.btn_reset_avg_hp.clicked.connect(self._reset_average_hp)
         self.lbl_hp_formula = QLabel("Max HP: 0")
         self.lbl_hp_formula.setObjectName("AccentText")
+        self.lbl_hp_formula.setWordWrap(True)
         hp_top.addWidget(self.cmb_hp_mode)
         hp_top.addWidget(self.btn_roll_all_hp)
         hp_top.addWidget(self.btn_reset_avg_hp)
@@ -1338,14 +1474,16 @@ class MainWindow(QMainWindow):
         hp_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         hp_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         hp_hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.tbl_hp_rolls.setColumnWidth(0, 44)
-        self.tbl_hp_rolls.setColumnWidth(2, 54)
-        self.tbl_hp_rolls.setColumnWidth(3, 145)
-        self.tbl_hp_rolls.setColumnWidth(4, 54)
-        self.tbl_hp_rolls.setColumnWidth(5, 62)
+        self.tbl_hp_rolls.setColumnWidth(0, 50)
+        self.tbl_hp_rolls.setColumnWidth(2, 62)
+        self.tbl_hp_rolls.setColumnWidth(3, 196)
+        self.tbl_hp_rolls.setColumnWidth(4, 62)
+        self.tbl_hp_rolls.setColumnWidth(5, 72)
         self.tbl_hp_rolls.verticalHeader().setVisible(False)
         self.tbl_hp_rolls.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.tbl_hp_rolls.setMaximumHeight(190)
+        self.tbl_hp_rolls.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tbl_hp_rolls.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tbl_hp_rolls.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         hp_v.addWidget(self.tbl_hp_rolls)
         layout.addWidget(self.hp_group)
 
@@ -1360,19 +1498,22 @@ class MainWindow(QMainWindow):
         r55_row.addWidget(QLabel("Exhaustion (0–6):"))
         self.spn_exhaustion = QSpinBox()
         self.spn_exhaustion.setRange(0, 6)
-        self.spn_exhaustion.setFixedWidth(56)
+        self.spn_exhaustion.setFixedWidth(84)
         self.spn_exhaustion.valueChanged.connect(self._on_55e_controls_changed)
         r55_row.addWidget(self.spn_exhaustion)
-        r55_row.addSpacing(12)
+        r55_row.addStretch()
+        r55_v.addLayout(r55_row)
 
+        r55_orders_row = QHBoxLayout()
         self.lbl_divine_order = QLabel("Divine Order:")
         self.cmb_divine_order = QComboBox()
         self.cmb_divine_order.addItem("— Choose —", "")
         for k, desc in DIVINE_ORDER_55E.items():
             self.cmb_divine_order.addItem(desc, k)
         self.cmb_divine_order.currentIndexChanged.connect(self._on_55e_controls_changed)
-        r55_row.addWidget(self.lbl_divine_order)
-        r55_row.addWidget(self.cmb_divine_order)
+        r55_orders_row.addWidget(self.lbl_divine_order)
+        r55_orders_row.addWidget(self.cmb_divine_order)
+        r55_orders_row.addSpacing(12)
 
         self.lbl_primal_order = QLabel("Primal Order:")
         self.cmb_primal_order = QComboBox()
@@ -1380,10 +1521,10 @@ class MainWindow(QMainWindow):
         for k, desc in PRIMAL_ORDER_55E.items():
             self.cmb_primal_order.addItem(desc, k)
         self.cmb_primal_order.currentIndexChanged.connect(self._on_55e_controls_changed)
-        r55_row.addWidget(self.lbl_primal_order)
-        r55_row.addWidget(self.cmb_primal_order)
-        r55_row.addStretch()
-        r55_v.addLayout(r55_row)
+        r55_orders_row.addWidget(self.lbl_primal_order)
+        r55_orders_row.addWidget(self.cmb_primal_order)
+        r55_orders_row.addStretch()
+        r55_v.addLayout(r55_orders_row)
 
         self.lbl_55e_notes = QLabel("")
         self.lbl_55e_notes.setObjectName("MutedText")
@@ -1410,7 +1551,8 @@ class MainWindow(QMainWindow):
         cards_grid.addWidget(self.btn_card_spells, 2, 1)
         layout.addLayout(cards_grid)
         layout.addStretch()
-        return tab
+        scroll.setWidget(tab)
+        return scroll
 
     def _make_overview_card(self, title: str, subtitle: str, target_tab: int) -> QPushButton:
         btn = QPushButton(f"{title}\n\n{subtitle}")
@@ -1441,6 +1583,17 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.lbl_point_buy)
         layout.addLayout(btn_row)
 
+        ov_row = QHBoxLayout()
+        self.chk_override_point_buy = QCheckBox("Override Point Buy (allow custom / rolled scores)")
+        self.chk_override_point_buy.stateChanged.connect(self._on_ability_overrides_toggled)
+        self.chk_override_asi_cap = QCheckBox("Allow Ability Scores Above 20")
+        self.chk_override_asi_cap.stateChanged.connect(self._on_ability_overrides_toggled)
+        ov_row.addWidget(self.chk_override_point_buy)
+        ov_row.addSpacing(12)
+        ov_row.addWidget(self.chk_override_asi_cap)
+        ov_row.addStretch()
+        layout.addLayout(ov_row)
+
         grid_box = QGroupBox("Ability Scores")
         grid = QGridLayout(grid_box)
         headers = ["Ability", "Base Score", "Bonus", "Total", "Modifier"]
@@ -1450,6 +1603,8 @@ class MainWindow(QMainWindow):
             grid.addWidget(lbl, 0, col)
 
         self.ab_spinboxes: dict[str, QSpinBox] = {}
+        self.ab_minus_btns: dict[str, QPushButton] = {}
+        self.ab_plus_btns: dict[str, QPushButton] = {}
         self.ab_bonus_labels: dict[str, QLabel] = {}
         self.ab_total_labels: dict[str, QLabel] = {}
         self.ab_mod_labels: dict[str, QLabel] = {}
@@ -1461,15 +1616,15 @@ class MainWindow(QMainWindow):
             btn_m.setObjectName("StepperBtn")
             spn = QSpinBox()
             spn.setObjectName("StepperSpin")
-            spn.setRange(3, 20)
+            spn.setRange(8, 15)
             spn.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
             spn.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            spn.setFixedWidth(56)
+            spn.setFixedWidth(68)
             spn.valueChanged.connect(self._on_ability_changed)
             btn_p = QPushButton("+")
             btn_p.setObjectName("StepperBtn")
-            btn_m.clicked.connect(lambda _=False, s=spn: s.setValue(max(3, s.value() - 1)))
-            btn_p.clicked.connect(lambda _=False, s=spn: s.setValue(min(20, s.value() + 1)))
+            btn_m.clicked.connect(lambda _=False, a=ab: self._step_ability(a, -1))
+            btn_p.clicked.connect(lambda _=False, a=ab: self._step_ability(a, 1))
             ctrl_box.addWidget(btn_m)
             ctrl_box.addWidget(spn)
             ctrl_box.addWidget(btn_p)
@@ -1486,6 +1641,8 @@ class MainWindow(QMainWindow):
             grid.addWidget(m_lbl, row, 4)
 
             self.ab_spinboxes[ab] = spn
+            self.ab_minus_btns[ab] = btn_m
+            self.ab_plus_btns[ab] = btn_p
             self.ab_bonus_labels[ab] = b_lbl
             self.ab_total_labels[ab] = t_lbl
             self.ab_mod_labels[ab] = m_lbl
@@ -1510,6 +1667,8 @@ class MainWindow(QMainWindow):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.selections_scroll = scroll
         self.selections_container = QWidget()
         self.selections_layout = QVBoxLayout(self.selections_container)
         self.selections_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -1577,6 +1736,7 @@ class MainWindow(QMainWindow):
         self.tbl_saves.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tbl_saves.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.tbl_saves.setFixedHeight(header_h + 6 * row_h + 2 * self.tbl_saves.frameWidth() + 2)
+        self.tbl_saves.cellClicked.connect(self._on_save_cell_clicked)
         saves_layout.addWidget(self.tbl_saves)
         left_layout.addWidget(saves_group)
 
@@ -1607,6 +1767,7 @@ class MainWindow(QMainWindow):
         self.tbl_skills.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tbl_skills.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.tbl_skills.setFixedHeight(header_h + 18 * row_h + 2 * self.tbl_skills.frameWidth() + 2)
+        self.tbl_skills.cellClicked.connect(self._on_skill_cell_clicked)
         skills_layout.addWidget(self.tbl_skills)
         left_layout.addWidget(skills_group)
         left_layout.addStretch()
@@ -1618,6 +1779,42 @@ class MainWindow(QMainWindow):
 
         feat_group = QWidget()
         feat_layout = QVBoxLayout(feat_group)
+        prof_ov_hdr = QHBoxLayout()
+        self.chk_override_proficiencies = QCheckBox(
+            "Override Proficiencies (click Save / Skill Prof column, or add below)"
+        )
+        self.chk_override_proficiencies.stateChanged.connect(self._on_proficiency_override_toggled)
+        prof_ov_hdr.addWidget(self.chk_override_proficiencies)
+        feat_layout.addLayout(prof_ov_hdr)
+
+        self.manual_prof_bar = QWidget()
+        mp_row = QHBoxLayout(self.manual_prof_bar)
+        mp_row.setContentsMargins(0, 0, 0, 0)
+        self.cmb_manual_prof = QComboBox()
+        self.cmb_manual_prof.setEditable(True)
+        for p_opt in (
+            "Light Armor",
+            "Medium Armor",
+            "Heavy Armor",
+            "Shields",
+            "Simple Weapons",
+            "Martial Weapons",
+            "Thieves' Tools",
+            "Herbalism Kit",
+            "Disguise Kit",
+            "Poisoner's Kit",
+        ):
+            self.cmb_manual_prof.addItem(p_opt)
+        configure_dropdown_combo(self.cmb_manual_prof, max_visible=12)
+        btn_add_mp = QPushButton("+ Add Prof")
+        btn_add_mp.clicked.connect(self._add_manual_proficiency)
+        btn_rem_mp = QPushButton("Remove")
+        btn_rem_mp.clicked.connect(self._remove_manual_proficiency)
+        mp_row.addWidget(self.cmb_manual_prof, 1)
+        mp_row.addWidget(btn_add_mp)
+        mp_row.addWidget(btn_rem_mp)
+        feat_layout.addWidget(self.manual_prof_bar)
+
         self.lst_features = QListWidget()
         self.lst_features.currentItemChanged.connect(self._on_feature_selected)
         feat_layout.addWidget(self.lst_features, 1)
@@ -1674,6 +1871,7 @@ class MainWindow(QMainWindow):
         af_btns.addWidget(self.btn_add_animal_form)
         af_btns.addWidget(self.btn_rem_animal_form)
         af_btns.addWidget(self.btn_toggle_active_form)
+        af_btns.addStretch()
         fw_l.addLayout(af_btns)
 
         af_custom_btns = QHBoxLayout()
@@ -1722,7 +1920,7 @@ class MainWindow(QMainWindow):
         self.lst_char_companions.currentRowChanged.connect(self._on_char_companion_selected)
         cw_l.addWidget(self.lst_char_companions, 1)
 
-        cmp_btns = QHBoxLayout()
+        cmp_btns1 = QHBoxLayout()
         self.btn_open_companion = QPushButton("Open Companion Sheet")
         self.btn_open_companion.setObjectName("PrimaryBtn")
         self.btn_open_companion.clicked.connect(self._open_selected_attached_companion)
@@ -1733,11 +1931,16 @@ class MainWindow(QMainWindow):
         self.btn_remove_companion = QPushButton("Remove")
         self.btn_remove_companion.setObjectName("DangerBtn")
         self.btn_remove_companion.clicked.connect(self._remove_selected_companion)
-        cmp_btns.addWidget(self.btn_open_companion)
-        cmp_btns.addWidget(self.btn_save_comp_file)
-        cmp_btns.addWidget(self.btn_export_comp_pdf)
-        cmp_btns.addWidget(self.btn_remove_companion)
-        cw_l.addLayout(cmp_btns)
+        cmp_btns1.addWidget(self.btn_open_companion)
+        cmp_btns1.addWidget(self.btn_export_comp_pdf)
+        cmp_btns1.addStretch()
+        cw_l.addLayout(cmp_btns1)
+
+        cmp_btns2 = QHBoxLayout()
+        cmp_btns2.addWidget(self.btn_save_comp_file)
+        cmp_btns2.addWidget(self.btn_remove_companion)
+        cmp_btns2.addStretch()
+        cw_l.addLayout(cmp_btns2)
 
         self.companion_preview_browser = QTextBrowser()
         cw_l.addWidget(self.companion_preview_browser, 2)
@@ -1748,7 +1951,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setSizes([450, 530])
+        splitter.setSizes([460, 620])
         layout.addWidget(splitter)
         return tab
 
@@ -1767,6 +1970,7 @@ class MainWindow(QMainWindow):
             cur_layout.addWidget(QLabel(coin.upper() + ":"))
             spn = QSpinBox()
             spn.setRange(0, 999999)
+            spn.setMinimumWidth(88)
             spn.valueChanged.connect(self._on_currency_changed)
             cur_layout.addWidget(spn)
             self.cur_spins[coin] = spn
@@ -1837,10 +2041,10 @@ class MainWindow(QMainWindow):
         eq_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         eq_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         eq_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.tbl_equip_catalog.setColumnWidth(0, 48)
-        self.tbl_equip_catalog.setColumnWidth(2, 58)
-        self.tbl_equip_catalog.setColumnWidth(3, 66)
-        self.tbl_equip_catalog.setColumnWidth(4, 72)
+        self.tbl_equip_catalog.setColumnWidth(0, 54)
+        self.tbl_equip_catalog.setColumnWidth(2, 98)
+        self.tbl_equip_catalog.setColumnWidth(3, 78)
+        self.tbl_equip_catalog.setColumnWidth(4, 88)
         eq_hdr.sectionClicked.connect(self._on_equip_header_clicked)
         self.tbl_equip_catalog.currentCellChanged.connect(self._on_equip_preview)
         self.tbl_equip_catalog.cellDoubleClicked.connect(lambda _r, _c: self._add_selected_equipment())
@@ -1851,8 +2055,9 @@ class MainWindow(QMainWindow):
         btn_add_eq.clicked.connect(self._add_selected_equipment)
         self.btn_magic_gear = QPushButton("✦ Magic / Infused Armor & Weapons…")
         self.btn_magic_gear.clicked.connect(self._open_magic_gear_dialog)
-        eq_btn_row.addWidget(btn_add_eq, 1)
-        eq_btn_row.addWidget(self.btn_magic_gear, 1)
+        eq_btn_row.addWidget(btn_add_eq)
+        eq_btn_row.addWidget(self.btn_magic_gear)
+        eq_btn_row.addStretch()
         cat_layout.addLayout(eq_btn_row)
 
         right_eq = QWidget()
@@ -1874,7 +2079,10 @@ class MainWindow(QMainWindow):
 
         self.tbl_inventory = QTableWidget(0, 6)
         self.tbl_inventory.setHorizontalHeaderLabels(["Item", "Type", "Qty", "Equipped", "Attuned", "Weight"])
-        self.tbl_inventory.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        inv_hdr = self.tbl_inventory.horizontalHeader()
+        inv_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in range(1, 6):
+            inv_hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.tbl_inventory.verticalHeader().setVisible(False)
         inv_layout.addWidget(self.tbl_inventory)
         btn_rem_eq = QPushButton("Remove Selected Item")
@@ -2015,9 +2223,9 @@ class MainWindow(QMainWindow):
         sp_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         sp_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         sp_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.tbl_spell_catalog.setColumnWidth(1, 54)
-        self.tbl_spell_catalog.setColumnWidth(2, 114)
-        self.tbl_spell_catalog.setColumnWidth(3, 64)
+        self.tbl_spell_catalog.setColumnWidth(1, 68)
+        self.tbl_spell_catalog.setColumnWidth(2, 138)
+        self.tbl_spell_catalog.setColumnWidth(3, 76)
         sp_hdr.sectionClicked.connect(self._on_spell_header_clicked)
         self.tbl_spell_catalog.currentCellChanged.connect(self._on_spell_preview)
         self.tbl_spell_catalog.cellDoubleClicked.connect(lambda _r, _c: self._add_selected_spell())
@@ -2241,6 +2449,7 @@ class MainWindow(QMainWindow):
         is_55e = self.state.ruleset == "5.5e"
         self.tab_race.set_title("Species" if is_55e else "Race")
         self.nav_buttons[1].setText("Species" if is_55e else "Race")
+        fit_button(self.nav_buttons[1])
         self.bg_asi_group.setVisible(is_55e)
         self.rules_55e_group.setVisible(is_55e)
         self.chk_heroic_inspiration.setChecked(bool(self.state.heroic_inspiration))
@@ -2268,6 +2477,7 @@ class MainWindow(QMainWindow):
         self.btn_rule_overrides.setText(
             f"⚙ Rule Overrides ({active_ov})…" if active_ov else "⚙ Rule Overrides…"
         )
+        fit_button(self.btn_rule_overrides)
 
         bg_el = self.repo.get(self.state.background_id)
         allowed = get_55e_background_abilities(bg_el)
@@ -2307,7 +2517,15 @@ class MainWindow(QMainWindow):
         self.spn_level.setValue(self.state.level)
         self.lbl_overview_level.setText(f"Level {self.state.level}")
         if hasattr(self, "spn_xp"):
-            self.spn_xp.setValue(self.state.xp)
+            if self.spn_xp.value() != self.state.xp:
+                self.spn_xp.setValue(self.state.xp)
+            cur_th = xp_for_level(self.state.level)
+            nxt_txt = (
+                f"Next level (Lv {self.state.level + 1}): {xp_for_level(self.state.level + 1):,} XP"
+                if self.state.level < 20
+                else "Maximum Level reached"
+            )
+            self.spn_xp.setToolTip(f"Level {self.state.level}: {cur_th:,} XP • {nxt_txt}")
 
         self.tab_race.sync_selected(self.state.race_id)
         self.tab_class.sync_selected(self.state.class_id)
@@ -2373,6 +2591,22 @@ class MainWindow(QMainWindow):
             return
         self._choices_sig = choices_sig
 
+        scroll_areas = [
+            self.selections_scroll,
+            self.tab_race.choices_scroll,
+            self.tab_class.choices_scroll,
+            self.tab_background.choices_scroll,
+        ]
+        saved_scroll_vals = [sa.verticalScrollBar().value() for sa in scroll_areas]
+        containers = [
+            self.selections_container,
+            self.tab_race.choices_container,
+            self.tab_class.choices_container,
+            self.tab_background.choices_container,
+        ]
+        for c in containers:
+            c.setUpdatesEnabled(False)
+
         self._clear_layout(self.selections_layout)
         self._clear_layout(self.tab_race.choices_layout)
         self._clear_layout(self.tab_class.choices_layout)
@@ -2395,6 +2629,18 @@ class MainWindow(QMainWindow):
                 self._add_selection_widget(active_sel, filled, self.tab_class.choices_layout)
             elif active_sel.source_element_id == self.state.background_id or (src_el and src_el.type in ("Background", "Background Feature")):
                 self._add_selection_widget(active_sel, filled, self.tab_background.choices_layout)
+
+        for c in containers:
+            ensure_widgets_fit(c)
+            c.setUpdatesEnabled(True)
+
+        def _restore_scrolls() -> None:
+            for sa, pos in zip(scroll_areas, saved_scroll_vals):
+                sb = sa.verticalScrollBar()
+                sb.setValue(min(pos, sb.maximum()))
+
+        _restore_scrolls()
+        QTimer.singleShot(0, _restore_scrolls)
 
         if pending_total > 0:
             self.lbl_choices_pending.setText(f"{pending_total} choice(s) remaining")
@@ -2420,6 +2666,7 @@ class MainWindow(QMainWindow):
         lbl_title = QLabel(
             f"<b>{active_sel.rule.name}</b> <span style='color:#94a3b8;'>({active_sel.source_element_name})</span>"
         )
+        lbl_title.setWordWrap(True)
         status_color = "#4ade80" if filled >= active_sel.rule.number else "#facc15"
         status_text = (
             f"✓ {filled}/{active_sel.rule.number}"
@@ -2427,7 +2674,7 @@ class MainWindow(QMainWindow):
             else f"• {filled}/{active_sel.rule.number}"
         )
         lbl_status = QLabel(status_text)
-        lbl_status.setStyleSheet(f"color:{status_color}; font-weight:bold; font-size:8.5pt;")
+        lbl_status.setStyleSheet(f"color:{status_color}; font-weight:bold;")
         hdr.addWidget(lbl_title, 1)
         hdr.addWidget(lbl_status)
         vbox.addLayout(hdr)
@@ -2443,6 +2690,7 @@ class MainWindow(QMainWindow):
 
         for slot_idx in range(active_sel.rule.number):
             cmb = QComboBox()
+            configure_dropdown_combo(cmb, max_visible=14)
             cmb.addItem("— Choose —", "")
             current_val = chosen[slot_idx] if slot_idx < len(chosen) else ""
             same_sel_other = {
@@ -2458,7 +2706,7 @@ class MainWindow(QMainWindow):
 
             seen_opts: set[str] = set()
             for opt_id, opt_name in active_sel.options:
-                if opt_id in taken_ids or opt_id in seen_opts:
+                if (not is_synthetic_asi_id(opt_id) and opt_id in taken_ids) or opt_id in seen_opts:
                     continue
                 seen_opts.add(opt_id)
                 cmb.addItem(opt_name, opt_id)
@@ -2475,13 +2723,15 @@ class MainWindow(QMainWindow):
                     lst = list(self.state.selections.get(skey, [""] * count))
                     while len(lst) < count:
                         lst.append("")
-                    if val and any(i != sidx and v == val for i, v in enumerate(lst)):
+                    if val and not is_synthetic_asi_id(val) and any(i != sidx and v == val for i, v in enumerate(lst)):
                         return
                     lst[sidx] = val
                     self.state.selections[skey] = lst
                     self._mark_dirty()
-                    if val and val in self.repo.by_id:
-                        self._show_element_description(self.repo.by_id[val], self.choice_desc_browser)
+                    if val:
+                        desc_el = self.repo.by_id.get(val) or get_synthetic_asi_element(val)
+                        if desc_el is not None:
+                            self._show_element_description(desc_el, self.choice_desc_browser)
                     self._recalculate_and_refresh()
 
                 return _on_changed
@@ -2493,33 +2743,73 @@ class MainWindow(QMainWindow):
 
         target_layout.addWidget(card)
 
+    def _is_point_buy_enforced(self) -> bool:
+        return not (
+            self.state.has_override("override_point_buy")
+            or self.state.has_override("override_asi_cap")
+        )
+
     def _sync_abilities_tab(self) -> None:
+        asi_cap_ov = self.state.has_override("override_asi_cap")
+        pb_enforced = self._is_point_buy_enforced()
+        self.chk_override_point_buy.setChecked(self.state.has_override("override_point_buy"))
+        self.chk_override_asi_cap.setChecked(asi_cap_ov)
+
         used_pts = 0
         valid_pb = True
         for ab in ABILITIES:
-            base = self.state.abilities.get(ab, 10)
-            self.ab_spinboxes[ab].setValue(base)
+            base = int(self.state.abilities.get(ab, 10))
+            if base in POINT_BUY_COSTS:
+                used_pts += POINT_BUY_COSTS[base]
+            else:
+                valid_pb = False
+
+        max_unrestricted = 30 if asi_cap_ov else 20
+        for ab in ABILITIES:
+            base = int(self.state.abilities.get(ab, 10))
+            spn = self.ab_spinboxes[ab]
+            if pb_enforced and valid_pb:
+                other_pts = used_pts - POINT_BUY_COSTS.get(base, 0)
+                max_for_ab = base
+                for cand in range(8, 16):
+                    if other_pts + POINT_BUY_COSTS[cand] <= 27:
+                        max_for_ab = cand
+                min_for_ab = min(8, base)
+                spn.setRange(min_for_ab, max(max_for_ab, base))
+                self.ab_minus_btns[ab].setEnabled(base > min_for_ab)
+                self.ab_plus_btns[ab].setEnabled(base < max_for_ab)
+            else:
+                spn.setRange(3, max_unrestricted)
+                self.ab_minus_btns[ab].setEnabled(base > 3)
+                self.ab_plus_btns[ab].setEnabled(base < max_unrestricted)
+
+            spn.setValue(base)
             bonus = self.computed.ability_bonuses[ab]
             tot = self.computed.ability_totals[ab]
             mod = self.computed.ability_modifiers[ab]
             self.ab_bonus_labels[ab].setText(_fmt_mod(bonus))
             self.ab_total_labels[ab].setText(str(tot))
             self.ab_mod_labels[ab].setText(_fmt_mod(mod))
-            if base in POINT_BUY_COSTS:
-                used_pts += POINT_BUY_COSTS[base]
-            else:
-                valid_pb = False
 
-        if valid_pb:
-            self.lbl_point_buy.setText(f"Point Buy: {used_pts} / 27 used")
+        if pb_enforced and valid_pb:
+            rem = 27 - used_pts
+            self.lbl_point_buy.setText(f"Point Buy: {used_pts} / 27 used ({rem} left)")
+        elif valid_pb:
+            self.lbl_point_buy.setText(f"Point Buy: {used_pts} / 27 (Override Active)")
         else:
-            self.lbl_point_buy.setText("Point Buy: Custom / Rolled scores")
+            self.lbl_point_buy.setText("Point Buy: Custom / Rolled (Override Active)")
 
     def _sync_skills_features_tab(self) -> None:
+        ov_profs = self.state.has_override("override_proficiencies")
+        self.chk_override_proficiencies.setChecked(ov_profs)
+        self.manual_prof_bar.setVisible(ov_profs)
+
         for row, ab in enumerate(ABILITIES):
             sv = self.computed.saving_throws[ab]
             prof_it = QTableWidgetItem("●" if sv.proficient else "○")
             prof_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if ov_profs:
+                prof_it.setToolTip("Click to toggle Saving Throw proficiency override")
             bonus_it = QTableWidgetItem(_fmt_mod(sv.bonus))
             bonus_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.tbl_saves.setItem(row, 0, QTableWidgetItem(ab.capitalize()))
@@ -2532,6 +2822,8 @@ class MainWindow(QMainWindow):
             attr_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             prof_it = QTableWidgetItem(mark)
             prof_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if ov_profs:
+                prof_it.setToolTip("Click to cycle manual override: None → Proficient → Expertise")
             bonus_it = QTableWidgetItem(_fmt_mod(sk.bonus))
             bonus_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.tbl_skills.setItem(row, 0, QTableWidgetItem(skill_name))
@@ -2547,6 +2839,11 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"[{el.type}] {el.name}")
             item.setData(Qt.ItemDataRole.UserRole, el.id)
             self.lst_features.addItem(item)
+        if ov_profs:
+            for mp in self.state.manual_proficiencies:
+                item = QListWidgetItem(f"[Manual Proficiency] {mp}")
+                item.setData(Qt.ItemDataRole.UserRole, f"manual_prof::{mp}")
+                self.lst_features.addItem(item)
         self.lst_features.setUpdatesEnabled(True)
         self._sync_animal_forms_tab()
         self._sync_companions_tab()
@@ -2619,6 +2916,7 @@ class MainWindow(QMainWindow):
 
             qty_spin = QSpinBox()
             qty_spin.setRange(1, 9999)
+            qty_spin.setMinimumWidth(84)
             qty_spin.setValue(inv.quantity)
 
             def make_qty_handler(r: int):
@@ -3022,10 +3320,8 @@ class MainWindow(QMainWindow):
             self._mark_dirty()
             self._recalculate_and_refresh()
 
-    def _on_level_changed(self) -> None:
-        if self._updating:
-            return
-        new_val = max(1, min(20, self.spn_level.value()))
+    def _apply_total_level(self, target_lvl: int) -> None:
+        new_val = max(1, min(20, int(target_lvl or 1)))
         norm = self.state.normalized_classes()
         if not norm:
             self.state.level = new_val
@@ -3034,11 +3330,26 @@ class MainWindow(QMainWindow):
             self.state.classes = norm
             self.state.sync_from_classes()
         else:
-            other_sum = sum(c.level for c in norm[1:])
-            prim_lvl = max(1, new_val - other_sum)
-            norm[0].level = prim_lvl
+            cur_total = sum(c.level for c in norm)
+            if new_val > cur_total:
+                norm[0].level += new_val - cur_total
+            elif new_val < cur_total:
+                to_trim = cur_total - new_val
+                for cl in reversed(norm):
+                    take = min(to_trim, max(0, cl.level - 1))
+                    cl.level -= take
+                    to_trim -= take
+                    if to_trim <= 0:
+                        break
             self.state.classes = norm
             self.state.sync_from_classes()
+
+    def _on_level_changed(self) -> None:
+        if self._updating:
+            return
+        new_val = max(1, min(20, self.spn_level.value()))
+        self._apply_total_level(new_val)
+        sync_xp_to_level(self.state)
         self._mark_dirty()
         self._recalculate_and_refresh()
 
@@ -3062,6 +3373,7 @@ class MainWindow(QMainWindow):
             return
 
         self.tbl_hp_rolls.setRowCount(len(rows))
+        row_h = 34
         for r, row_data in enumerate(rows):
             lvl_i = int(row_data["level"])
             hd_num = int(row_data["hd_num"])
@@ -3077,7 +3389,7 @@ class MainWindow(QMainWindow):
             spn = QSpinBox()
             spn.setRange(1, hd_num)
             spn.setValue(die_val)
-            spn.setFixedWidth(52)
+            spn.setFixedWidth(max(84, round(84 * self.config.ui_scale)))
             btn_r = QPushButton(f"d{hd_num}")
             btn_r.setObjectName("CompactCardBtn")
             btn_r.setToolTip(f"Roll 1d{hd_num} for Level {lvl_i}")
@@ -3105,10 +3417,15 @@ class MainWindow(QMainWindow):
             cl.addWidget(spn)
             cl.addWidget(btn_r)
             self.tbl_hp_rolls.setCellWidget(r, 3, cell_w)
-            self.tbl_hp_rolls.setRowHeight(r, 30)
+            self.tbl_hp_rolls.setRowHeight(r, row_h)
 
             self.tbl_hp_rolls.setItem(r, 4, QTableWidgetItem(_fmt_mod(int(row_data["con_mod"]))))
             self.tbl_hp_rolls.setItem(r, 5, QTableWidgetItem(str(row_data["total"])))
+
+        hdr_h = max(28, self.tbl_hp_rolls.horizontalHeader().sizeHint().height())
+        total_h = hdr_h + len(rows) * row_h + 2 * self.tbl_hp_rolls.frameWidth() + 4
+        self.tbl_hp_rolls.setMinimumHeight(total_h)
+        self.tbl_hp_rolls.setFixedHeight(total_h)
 
     def _on_hp_mode_changed(self) -> None:
         if self._updating:
@@ -3169,7 +3486,7 @@ class MainWindow(QMainWindow):
                 spn.setObjectName("StepperSpin")
                 spn.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
                 spn.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                spn.setFixedWidth(44)
+                spn.setFixedWidth(max(56, round(56 * self.config.ui_scale)))
                 spn.setRange(1, max(1, 20 - (total_lvl - cl.level)))
                 spn.setValue(cl.level)
                 btn_p = QPushButton("+")
@@ -3247,6 +3564,7 @@ class MainWindow(QMainWindow):
             self.state.level_order = self.state.normalized_level_order()
         self.state.level_order.extend([class_id] * add_lvl)
         self.state.sync_from_classes()
+        sync_xp_to_level(self.state)
         self._mark_dirty()
         self._recalculate_and_refresh()
 
@@ -3255,6 +3573,7 @@ class MainWindow(QMainWindow):
         self.state.classes = norm
         self.state.level_order = [cid for cid in self.state.level_order if cid != class_id]
         self.state.sync_from_classes()
+        sync_xp_to_level(self.state)
         self._mark_dirty()
         self._recalculate_and_refresh()
 
@@ -3268,6 +3587,7 @@ class MainWindow(QMainWindow):
                 break
         self.state.classes = norm
         self.state.sync_from_classes()
+        sync_xp_to_level(self.state)
         self._mark_dirty()
         self._recalculate_and_refresh()
 
@@ -3284,8 +3604,12 @@ class MainWindow(QMainWindow):
     def _on_xp_changed(self, val: int) -> None:
         if self._updating:
             return
-        self.state.xp = int(val)
+        self.state.xp = max(0, int(val))
+        target_lvl = level_for_xp(self.state.xp)
         self._mark_dirty()
+        if target_lvl != self.state.level:
+            self._apply_total_level(target_lvl)
+            self._recalculate_and_refresh()
 
     def _on_align_deity_changed(self) -> None:
         if self._updating:
@@ -3316,11 +3640,35 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._recalculate_and_refresh()
 
+    def _step_ability(self, ab: str, delta: int) -> None:
+        spn = self.ab_spinboxes[ab]
+        spn.setValue(max(spn.minimum(), min(spn.maximum(), spn.value() + delta)))
+
+    def _on_ability_overrides_toggled(self) -> None:
+        if self._updating:
+            return
+        self.state.set_override("override_point_buy", self.chk_override_point_buy.isChecked())
+        self.state.set_override("override_asi_cap", self.chk_override_asi_cap.isChecked())
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
     def _on_ability_changed(self) -> None:
         if self._updating:
             return
-        for ab, spn in self.ab_spinboxes.items():
-            self.state.abilities[ab] = spn.value()
+        pb_enforced = self._is_point_buy_enforced()
+        candidate = {ab: spn.value() for ab, spn in self.ab_spinboxes.items()}
+        if pb_enforced:
+            if all(v in POINT_BUY_COSTS for v in candidate.values()):
+                cost = sum(POINT_BUY_COSTS[v] for v in candidate.values())
+                if cost > 27:
+                    # Revert invalid step back to current state
+                    self._sync_abilities_tab()
+                    return
+            else:
+                self._sync_abilities_tab()
+                return
+        for ab, val in candidate.items():
+            self.state.abilities[ab] = val
         self._mark_dirty()
         self._recalculate_and_refresh()
 
@@ -3331,11 +3679,82 @@ class MainWindow(QMainWindow):
         self._recalculate_and_refresh()
 
     def _roll_abilities(self) -> None:
+        if self._is_point_buy_enforced():
+            reply = QMessageBox.question(
+                self,
+                "Point Buy Enforced",
+                "Point Buy is enforced by default. Enable 'Override Point Buy' to roll 4d6 Drop Lowest?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            self.state.set_override("override_point_buy", True)
         for ab in ABILITIES:
             rolls = sorted(random.randint(1, 6) for _ in range(4))
             self.state.abilities[ab] = sum(rolls[1:])
         self._mark_dirty()
         self._recalculate_and_refresh()
+
+    def _on_proficiency_override_toggled(self, checked: int) -> None:
+        if self._updating:
+            return
+        self.state.set_override("override_proficiencies", bool(checked))
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _on_save_cell_clicked(self, row: int, col: int) -> None:
+        if not self.state.has_override("override_proficiencies") or col != 1 or not (0 <= row < len(ABILITIES)):
+            return
+        ab = ABILITIES[row]
+        cur = list(self.state.manual_save_profs)
+        if ab in cur:
+            cur.remove(ab)
+        else:
+            cur.append(ab)
+        self.state.manual_save_profs = cur
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _on_skill_cell_clicked(self, row: int, col: int) -> None:
+        if not self.state.has_override("override_proficiencies") or col != 2:
+            return
+        item = self.tbl_skills.item(row, 0)
+        if item is None:
+            return
+        skill_name = item.text()
+        if skill_name in self.state.manual_skill_expertise:
+            self.state.manual_skill_expertise.remove(skill_name)
+        elif skill_name in self.state.manual_skill_profs:
+            self.state.manual_skill_profs.remove(skill_name)
+            self.state.manual_skill_expertise.append(skill_name)
+        else:
+            self.state.manual_skill_profs.append(skill_name)
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _add_manual_proficiency(self) -> None:
+        txt = self.cmb_manual_prof.currentText().strip()
+        if not txt or txt in self.state.manual_proficiencies:
+            return
+        self.state.set_override("override_proficiencies", True)
+        self.state.manual_proficiencies.append(txt)
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _remove_manual_proficiency(self) -> None:
+        cur_item = self.lst_features.currentItem()
+        data = cur_item.data(Qt.ItemDataRole.UserRole) if cur_item else ""
+        if isinstance(data, str) and data.startswith("manual_prof::"):
+            target = data.split("::", 1)[1]
+            if target in self.state.manual_proficiencies:
+                self.state.manual_proficiencies.remove(target)
+                self._mark_dirty()
+                self._recalculate_and_refresh()
+                return
+        txt = self.cmb_manual_prof.currentText().strip()
+        if txt in self.state.manual_proficiencies:
+            self.state.manual_proficiencies.remove(txt)
+            self._mark_dirty()
+            self._recalculate_and_refresh()
 
     def _refresh_feat_browser(self) -> None:
         q = self.txt_feat_search.text()

@@ -30,13 +30,19 @@ Cross-platform (Linux & Windows) D&D 5e / 5.5e character builder written in Pyth
 
 ## Installing & Running on Linux
 
-Run the all-in-one Linux installer (installs system deps `python3`/`venv`/`7z`/`qpdf` if needed, creates an isolated `.venv` in `~/.local/share/aurora-borealis/app`, installs `PySide6`, `lxml`, `pypdf`, registers `~/.local/bin/aurora-borealis`, SVG icon, MIME types `.dnd5e`/`.dnd55e`/`.dndcomp`, and application menu entry):
+Launch the graphical **Linux Setup Wizard** (supports both **Install / Repair** and **Uninstall** with directory picker, system dependency checks, desktop entry & `.dnd5e`/`.dnd55e`/`.dndcomp` file associations):
+
+```bash
+./setup-wizard-linux.sh
+```
+
+Or run the headless CLI installer directly:
 
 ```bash
 ./install-linux.sh
 ```
 
-Or run directly from the repo after dependencies are installed:
+Run directly from the repo after dependencies are installed:
 
 ```bash
 ./aurora-borealis
@@ -48,7 +54,7 @@ To install only the desktop entry & MIME associations for the current folder:
 ./install-desktop.sh
 ```
 
-To uninstall on Linux (keeps your characters in Documents):
+To uninstall on Linux via CLI (keeps your characters in Documents; add `--purge-config` to also clear config/caches):
 
 ```bash
 ./uninstall-linux.sh
@@ -56,16 +62,16 @@ To uninstall on Linux (keeps your characters in Documents):
 
 ## Installing & Running on Windows
 
-Double-click **`install-windows.bat`** (or run in PowerShell):
+Double-click **`setup-wizard-windows.bat`** to launch the graphical **Windows Setup Wizard** (supports both **Install / Repair** and **Uninstall**, target directory picker, optional Desktop shortcut, `.dnd5e`/`.dnd55e`/`.dndcomp` associations, and automatic Python/7-Zip check via `winget`).
+
+Or double-click **`install-windows.bat`** (headless PowerShell installer) / run in PowerShell:
 
 ```powershell
 .\install-windows.ps1 -CreateDesktopShortcut -RegisterFileAssociations
 ```
 
-This checks/installs Python 3.10+ (via `winget` if missing), sets up an isolated `.venv` in `%LOCALAPPDATA%\Aurora Borealis\app`, installs dependencies, generates `.ico` shortcuts in the Start Menu & Desktop, and associates `.dnd5e`, `.dnd55e`, and `.dndcomp` files.
-
 Launch anytime via the Start Menu, Desktop shortcut, `aurora-borealis.bat`, or `.\aurora-borealis.ps1`.
-To uninstall on Windows (keeps your characters), use **Settings → Apps → Aurora Borealis** or run `.\uninstall-windows.ps1`.
+To uninstall on Windows (keeps your characters), use **Settings → Apps → Aurora Borealis**, run the **Aurora Borealis Setup Wizard** from the Start Menu, or run `.\uninstall-windows.ps1` (`-PurgeConfig` optionally clears config/cache).
 
 For a standalone `.exe` / Inno Setup Windows installer bundle (`AuroraBorealis-Setup.exe`), see `packaging/windows/build-windows-installer.ps1`.
 

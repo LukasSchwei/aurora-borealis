@@ -6,8 +6,9 @@ import copy
 import random
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStackedWidget,
@@ -37,7 +39,9 @@ from PySide6.QtWidgets import (
 from ..engine import (
     RulesEngine,
     check_multiclass_prerequisites,
+    is_asi_select_rule,
     is_spell_eligible_for_caster,
+    is_synthetic_asi_id,
     parse_hit_die,
 )
 from ..level_up import (
@@ -48,6 +52,7 @@ from ..level_up import (
 )
 from ..loader import ContentRepository
 from ..models import ABILITIES, ABILITY_ABBR, ActiveSelection, CharacterState, ClassSpellcasting, ComputedCharacter, Element
+from .ui_helpers import configure_dropdown_combo, ensure_widgets_fit, install_global_wheel_filter
 
 
 class LevelUpWizardDialog(QDialog):
@@ -85,16 +90,19 @@ class LevelUpWizardDialog(QDialog):
         self._wizard_asi_ab_b: str = "constitution"
         self._wizard_feat_id: str = ""
         self._wizard_added_spells: list[str] = []
+        self._wizard_removed_spells: list[str] = []
         self._wizard_prepared_spells: set[str] = set()
 
         self.setWindowTitle(
             f"Level-Up Wizard — {state.name or 'Adventurer'} (Lv {state.level} → {min(20, state.level + 1)})"
         )
-        self.resize(960, 680)
+        install_global_wheel_filter(QApplication.instance())
+        self.resize(1120, 740)
         self._build_ui()
         self._init_step0_options()
         self._rebuild_draft()
         self._go_to_page(0)
+        ensure_widgets_fit(self)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -203,7 +211,7 @@ class LevelUpWizardDialog(QDialog):
         roll_row.addWidget(QLabel("Die Roll:"))
         self.spn_hp_roll = QSpinBox()
         self.spn_hp_roll.setRange(1, 12)
-        self.spn_hp_roll.setFixedWidth(72)
+        self.spn_hp_roll.setFixedWidth(96)
         self.spn_hp_roll.valueChanged.connect(self._on_hp_choice_changed)
         self.btn_roll_die = QPushButton("🎲 Roll 1d8")
         self.btn_roll_die.clicked.connect(self._roll_hp_die)
@@ -243,6 +251,8 @@ class LevelUpWizardDialog(QDialog):
         rl = QVBoxLayout(right)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.choices_scroll = scroll
         self.choices_host = QWidget()
         self.choices_layout = QVBoxLayout(self.choices_host)
         self.choices_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -251,7 +261,7 @@ class LevelUpWizardDialog(QDialog):
 
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setSizes([440, 480])
+        splitter.setSizes([380, 620])
         layout.addWidget(splitter, 1)
         return page
 
@@ -351,7 +361,13 @@ class LevelUpWizardDialog(QDialog):
         self.lbl_spell_status = QLabel("")
         self.lbl_spell_status.setObjectName("TitleText")
         self.lbl_spell_status.setWordWrap(True)
-        layout.addWidget(self.lbl_spell_status)
+        self.chk_override_spells = QCheckBox("Override spell limits")
+        self.chk_override_spells.setChecked(self._before_state.has_override("allow_extra_spells"))
+        self.chk_override_spells.stateChanged.connect(lambda _v: self._rebuild_draft())
+        sp_hdr_row = QHBoxLayout()
+        sp_hdr_row.addWidget(self.lbl_spell_status, 1)
+        sp_hdr_row.addWidget(self.chk_override_spells)
+        layout.addLayout(sp_hdr_row)
 
         self.spells_widget = QWidget()
         swl = QVBoxLayout(self.spells_widget)
@@ -398,12 +414,12 @@ class LevelUpWizardDialog(QDialog):
         rbl = QVBoxLayout(right_box)
         rbl.setContentsMargins(0, 0, 0, 0)
 
-        added_grp = QGroupBox("Spells Added This Level")
+        added_grp = QGroupBox("Current & Added Spells (This Class)")
         agl = QVBoxLayout(added_grp)
         self.lst_added_spells = QListWidget()
         self.lst_added_spells.currentItemChanged.connect(self._on_added_spell_preview)
         agl.addWidget(self.lst_added_spells, 1)
-        self.btn_rem_spell = QPushButton("Remove Selected")
+        self.btn_rem_spell = QPushButton("− Remove Selected Spell")
         self.btn_rem_spell.setObjectName("DangerBtn")
         self.btn_rem_spell.clicked.connect(self._remove_wizard_spell)
         agl.addWidget(self.btn_rem_spell)
@@ -488,6 +504,7 @@ class LevelUpWizardDialog(QDialog):
         self._wizard_selections.clear()
         self._wizard_feat_id = ""
         self._wizard_added_spells.clear()
+        self._wizard_removed_spells.clear()
         self._wizard_prepared_spells.clear()
         self._rebuild_draft()
 
@@ -548,6 +565,13 @@ class LevelUpWizardDialog(QDialog):
                         ab_b = next(a for a in ABILITIES if a != self._wizard_asi_ab_a)
                     draft.level_up_asi[asi_key] = {self._wizard_asi_ab_a: 1, ab_b: 1}
 
+        if self._wizard_removed_spells:
+            rem_set = set(self._wizard_removed_spells)
+            draft.known_spells = [s for s in draft.known_spells if s not in rem_set]
+            draft.prepared_spells = [s for s in draft.prepared_spells if s not in rem_set]
+            for sid in rem_set:
+                draft.spell_sources.pop(sid, None)
+
         for sid in self._wizard_added_spells:
             if sid not in draft.known_spells:
                 draft.known_spells.append(sid)
@@ -555,6 +579,13 @@ class LevelUpWizardDialog(QDialog):
                 draft.spell_sources[sid] = target_cid
             if sid in self._wizard_prepared_spells and sid not in draft.prepared_spells:
                 draft.prepared_spells.append(sid)
+
+        for sid in self._wizard_prepared_spells:
+            if sid in draft.known_spells and sid not in draft.prepared_spells:
+                draft.prepared_spells.append(sid)
+
+        if hasattr(self, "chk_override_spells") and self.chk_override_spells.isChecked():
+            draft.set_override("allow_extra_spells", True)
 
         self._draft_state = draft
         self._draft_comp = self.engine.evaluate(draft)
@@ -598,11 +629,7 @@ class LevelUpWizardDialog(QDialog):
             is_spell = active_sel.rule.type == "Spell"
             if spell_only and not is_spell:
                 continue
-            if not spell_only and (
-                is_spell
-                or active_sel.rule.type == "Ability Score Improvement"
-                or "ability score improvement" in active_sel.rule.name.lower()
-            ):
+            if not spell_only and (is_spell or is_asi_select_rule(active_sel.rule)):
                 continue
             chosen = self._draft_state.selections.get(active_sel.key, [])
             filled = sum(1 for i in range(active_sel.rule.number) if i < len(chosen) and chosen[i])
@@ -618,18 +645,24 @@ class LevelUpWizardDialog(QDialog):
         vl = QVBoxLayout(card)
         vl.setContentsMargins(10, 8, 10, 8)
         vl.setSpacing(6)
-        vl.addWidget(QLabel(f"<b>{active_sel.rule.name}</b> <span style='color:#94a3b8;'>({active_sel.source_element_name})</span>"))
+        lbl_hdr = QLabel(
+            f"<b>{active_sel.rule.name}</b> <span style='color:#94a3b8;'>({active_sel.source_element_name})</span>"
+        )
+        lbl_hdr.setWordWrap(True)
+        vl.addWidget(lbl_hdr)
 
         all_granted = {e.id for e in self._draft_comp.granted_elements}
         for slot_idx in range(active_sel.rule.number):
             cmb = QComboBox()
+            configure_dropdown_combo(cmb, max_visible=14)
+            cmb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             cmb.addItem("— Choose —", "")
             cur_val = chosen[slot_idx] if slot_idx < len(chosen) else ""
             taken = set(all_granted) if active_sel.rule.type != "List" else set()
             taken.discard(cur_val)
             seen: set[str] = set()
             for opt_id, opt_name in active_sel.options:
-                if opt_id in taken or opt_id in seen:
+                if (not is_synthetic_asi_id(opt_id) and opt_id in taken) or opt_id in seen:
                     continue
                 seen.add(opt_id)
                 cmb.addItem(opt_name, opt_id)
@@ -677,6 +710,8 @@ class LevelUpWizardDialog(QDialog):
         if not new_els:
             self.lst_new_features.addItem("(No automatic new features at this level)")
 
+        saved_scroll = self.choices_scroll.verticalScrollBar().value()
+        self.choices_host.setUpdatesEnabled(False)
         self._clear_layout(self.choices_layout)
         sels = self._newly_unlocked_selections(spell_only=False)
         if not sels:
@@ -686,6 +721,14 @@ class LevelUpWizardDialog(QDialog):
         else:
             for active_sel in sels:
                 self._render_selection_card(active_sel, self.choices_layout)
+        self.choices_host.setUpdatesEnabled(True)
+
+        def _restore_wiz_scroll() -> None:
+            sb = self.choices_scroll.verticalScrollBar()
+            sb.setValue(min(saved_scroll, sb.maximum()))
+
+        _restore_wiz_scroll()
+        QTimer.singleShot(0, _restore_wiz_scroll)
 
     def _on_feature_preview(self, current: Optional[QListWidgetItem]) -> None:
         if current is None:
@@ -778,6 +821,37 @@ class LevelUpWizardDialog(QDialog):
                 return c
         return None
 
+    def _wizard_spell_counts(self, caster: ClassSpellcasting) -> tuple[int, int, int]:
+        """Return (cantrips, known_leveled, prepared_leveled) for this caster on the draft state."""
+        sc = self._draft_comp.spellcasting
+        single_caster = bool(sc and len(sc.casters) == 1)
+        always_prep = set(caster.always_prepared_spell_ids)
+        owned_sids: list[str] = list(caster.granted_spell_ids)
+        for sid in self._draft_state.known_spells:
+            src = self._draft_state.spell_sources.get(sid, "")
+            if (src == caster.source_class_id or (not src and single_caster)) and sid not in owned_sids:
+                owned_sids.append(sid)
+        cantrips = 0
+        known_leveled = 0
+        for sid in owned_sids:
+            el = self.repo.get(sid)
+            lvl_str = el.setters.get("level", "0") if el else "0"
+            if lvl_str == "0":
+                cantrips += 1
+            elif sid not in always_prep:
+                known_leveled += 1
+
+        prep_leveled = 0
+        for sid in self._draft_state.prepared_spells:
+            if sid in always_prep:
+                continue
+            src = self._draft_state.spell_sources.get(sid, "")
+            if src == caster.source_class_id or (not src and single_caster):
+                el = self.repo.get(sid)
+                if not el or el.setters.get("level", "0") != "0":
+                    prep_leveled += 1
+        return cantrips, known_leveled, prep_leveled
+
     def _refresh_spells_page(self) -> None:
         caster = self._active_target_caster()
         self._clear_layout(self.spell_selects_layout)
@@ -791,6 +865,7 @@ class LevelUpWizardDialog(QDialog):
         self.spells_widget.show()
         if caster is not None:
             sc = self._draft_comp.spellcasting
+            c_cnt, k_cnt, p_cnt = self._wizard_spell_counts(caster)
             slot_txt = ", ".join(f"L{k}:{v}" for k, v in sorted(sc.slots.items())) if sc else ""
             if sc and sc.pact_slots:
                 slot_txt += (" | " if slot_txt else "") + "Pact: " + ", ".join(
@@ -799,16 +874,18 @@ class LevelUpWizardDialog(QDialog):
             self.lbl_spell_status.setText(
                 f"{caster.source_class_name} Spellcasting ({caster.ability}) — Slots: {slot_txt or 'Cantrips'}"
             )
-            limits = [f"Max Spell Level for {caster.source_class_name}: {caster.max_spell_level}"]
+            limits = [f"Max Spell Level: {caster.max_spell_level}"]
             if caster.max_cantrips:
-                limits.append(f"Cantrips Limit: {caster.max_cantrips}")
+                limits.append(f"Cantrips: {c_cnt} / {caster.max_cantrips}")
             if caster.max_known_spells is not None:
-                limits.append(f"Known/Book Limit: {caster.max_known_spells}")
+                limits.append(f"Known/Book: {k_cnt} / {caster.max_known_spells}")
             if caster.max_prepared_spells is not None:
-                limits.append(f"Prepared Limit: {caster.max_prepared_spells}")
+                limits.append(f"Prepared: {p_cnt} / {caster.max_prepared_spells}")
+            if self.chk_override_spells.isChecked():
+                limits.append("[Limit Override Active]")
             if caster.always_prepared_spell_ids:
                 names = [self.repo.get(s).name if self.repo.get(s) else s for s in caster.always_prepared_spell_ids]
-                limits.append(f"Subclass Always Prepared: {', '.join(names)}")
+                limits.append(f"Always Prepared: {', '.join(names)}")
             self.lbl_spell_subinfo.setText("  •  ".join(limits))
         else:
             self.lbl_spell_status.setText("New Spell Choices Unlocked")
@@ -819,19 +896,60 @@ class LevelUpWizardDialog(QDialog):
 
         self._refresh_spell_catalog()
         self.lst_added_spells.clear()
-        for sid in self._wizard_added_spells:
+        added_set = set(self._wizard_added_spells)
+        if caster is not None:
+            sc = self._draft_comp.spellcasting
+            single_caster = bool(sc and len(sc.casters) == 1)
+            granted_set = set(caster.granted_spell_ids)
+            always_prep = set(caster.always_prepared_spell_ids)
+            known_for_caster = [
+                sid
+                for sid in self._draft_state.known_spells
+                if (
+                    self._draft_state.spell_sources.get(sid, "") == caster.source_class_id
+                    or (not self._draft_state.spell_sources.get(sid, "") and single_caster)
+                )
+            ]
+            display_sids = list(dict.fromkeys([*known_for_caster, *caster.granted_spell_ids]))
+            known_set = set(known_for_caster)
+        else:
+            granted_set = set()
+            always_prep = set()
+            display_sids = list(dict.fromkeys([*self._draft_state.known_spells, *self._wizard_added_spells]))
+            known_set = set(display_sids)
+
+        def _spell_sort_key(spell_id: str) -> tuple[int, str]:
+            el_s = self.repo.get(spell_id)
+            lvl_s = str(el_s.setters.get("level", "0")).strip() if el_s else "0"
+            lvl_n = int(lvl_s) if lvl_s.isdigit() else 0
+            return (lvl_n, (el_s.name if el_s else spell_id).lower())
+
+        display_sids.sort(key=_spell_sort_key)
+        prep_set = set(self._draft_state.prepared_spells) | self._wizard_prepared_spells
+        for sid in display_sids:
             el = self.repo.get(sid)
             lvl = el.setters.get("level", "0") if el else "?"
-            prep = " [Prepared]" if sid in self._wizard_prepared_spells else ""
-            it = QListWidgetItem(f"{el.name if el else sid} (Lv {lvl}){prep}")
+            removable = (sid in known_set) or (sid in added_set)
+            tags: list[str] = []
+            if sid in added_set:
+                tags.append("[New]")
+            if sid in always_prep:
+                tags.append("[Always Prepared]")
+            elif sid in prep_set:
+                tags.append("[Prepared]")
+            if sid in granted_set and not removable:
+                tags.append("[Granted]")
+            tag_str = (" " + " ".join(tags)) if tags else ""
+            it = QListWidgetItem(f"{el.name if el else sid} (Lv {lvl}){tag_str}")
             it.setData(Qt.ItemDataRole.UserRole, sid)
+            it.setData(Qt.ItemDataRole.UserRole + 1, removable)
             self.lst_added_spells.addItem(it)
 
     def _refresh_spell_catalog(self) -> None:
         caster = self._active_target_caster()
         q = self.txt_spell_search.text().strip()
         spells = self.repo.search(q, ["Spell"])
-        already = set(self._before_state.known_spells) | set(
+        already = set(self._draft_state.known_spells) | set(
             self._draft_comp.spellcasting.granted_spell_ids if self._draft_comp.spellcasting else []
         )
         filtered: list[Element] = []
@@ -883,12 +1001,52 @@ class LevelUpWizardDialog(QDialog):
         sid = it.data(Qt.ItemDataRole.UserRole) if it else ""
         if not sid or sid in self._wizard_added_spells:
             return
-        self._wizard_added_spells.append(sid)
+
         caster = self._active_target_caster()
-        if caster and caster.prepare:
-            el = self.repo.get(sid)
-            if el and el.setters.get("level", "0") != "0":
-                self._wizard_prepared_spells.add(sid)
+        el = self.repo.get(sid)
+        lvl_str = str(el.setters.get("level", "0")).strip() if el else "0"
+        lvl = int(lvl_str) if lvl_str.isdigit() else 0
+
+        if not self.chk_override_spells.isChecked() and caster is not None:
+            c_cnt, k_cnt, p_cnt = self._wizard_spell_counts(caster)
+            if lvl == 0 and c_cnt >= caster.max_cantrips:
+                QMessageBox.information(
+                    self,
+                    "Cantrip Limit Reached",
+                    f"You already have {c_cnt} / {caster.max_cantrips} cantrips for {caster.source_class_name}.\n"
+                    "Enable 'Override spell limits' to add more.",
+                )
+                return
+            if lvl > 0 and caster.max_known_spells is not None and k_cnt >= caster.max_known_spells:
+                QMessageBox.information(
+                    self,
+                    "Known Spell Limit Reached",
+                    f"You already know {k_cnt} / {caster.max_known_spells} leveled spells for {caster.source_class_name}.\n"
+                    "Enable 'Override spell limits' to add more.",
+                )
+                return
+            if (
+                lvl > 0
+                and caster.max_known_spells is None
+                and caster.max_prepared_spells is not None
+                and p_cnt >= caster.max_prepared_spells
+            ):
+                QMessageBox.information(
+                    self,
+                    "Prepared Spell Limit Reached",
+                    f"You already have {p_cnt} / {caster.max_prepared_spells} prepared spells for {caster.source_class_name}.\n"
+                    "Enable 'Override spell limits' to add more.",
+                )
+                return
+
+        if sid in self._wizard_removed_spells:
+            self._wizard_removed_spells.remove(sid)
+            if sid not in self._before_state.known_spells and sid not in self._wizard_added_spells:
+                self._wizard_added_spells.append(sid)
+        else:
+            self._wizard_added_spells.append(sid)
+        if caster and caster.prepare and lvl > 0:
+            self._wizard_prepared_spells.add(sid)
         self._rebuild_draft()
 
     def _remove_wizard_spell(self) -> None:
@@ -896,9 +1054,21 @@ class LevelUpWizardDialog(QDialog):
         if cur is None:
             return
         sid = cur.data(Qt.ItemDataRole.UserRole) or ""
+        removable = cur.data(Qt.ItemDataRole.UserRole + 1)
+        if removable is False:
+            QMessageBox.information(
+                self,
+                "Granted Spell",
+                "This spell is automatically granted by a class or subclass feature and cannot be removed manually.",
+            )
+            return
         if sid in self._wizard_added_spells:
             self._wizard_added_spells.remove(sid)
-        self._wizard_prepared_spells.discard(sid)
+            self._wizard_prepared_spells.discard(sid)
+        elif sid in self._before_state.known_spells:
+            if sid not in self._wizard_removed_spells:
+                self._wizard_removed_spells.append(sid)
+            self._wizard_prepared_spells.discard(sid)
         self._rebuild_draft()
 
     def _refresh_diff_page(self) -> None:

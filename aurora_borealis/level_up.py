@@ -7,7 +7,7 @@ import html
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .engine import class_display_summary, parse_hit_die
+from .engine import class_display_summary, parse_hit_die, sync_xp_to_level
 from .loader import ContentRepository
 from .models import ABILITIES, ABILITY_ABBR, CharacterState, ClassLevel, ComputedCharacter, Element
 
@@ -47,6 +47,7 @@ class CharacterDiff:
     slot_deltas: list[tuple[int, int, int]] = field(default_factory=list)
     pact_slot_deltas: list[tuple[int, int, int]] = field(default_factory=list)
     new_spells: list[tuple[str, str]] = field(default_factory=list)
+    removed_spells: list[tuple[str, str]] = field(default_factory=list)
     asi_summary: list[str] = field(default_factory=list)
 
 
@@ -97,6 +98,7 @@ def apply_level_up_step(
         new_state.level_order = state.normalized_level_order()
     new_state.level_order.append(class_id)
     new_state.sync_from_classes()
+    sync_xp_to_level(new_state)
 
     if hp_mode in ("average", "rolled"):
         new_state.hp_mode = hp_mode
@@ -257,6 +259,17 @@ def compute_character_diff(
                 src_lbl = "Known / Learned"
             new_spells.append((sname, src_lbl))
 
+    a_spells = set(after_state.known_spells) | a_granted_sp
+    removed_spells: list[tuple[str, str]] = []
+    for sid in before_state.known_spells:
+        if sid not in a_spells:
+            sel = repo.get(sid)
+            sname = sel.name if sel else sid
+            src_cid = before_state.spell_sources.get(sid, "")
+            src_el = repo.get(src_cid) if src_cid else None
+            src_lbl = src_el.name if src_el is not None else "Known / Learned"
+            removed_spells.append((sname, src_lbl))
+
     asi_summary: list[str] = []
     asi_key = f"{target_class_id}::{target_new_lvl}" if target_class_id else ""
     if asi_key and asi_key in after_state.level_up_asi:
@@ -290,6 +303,7 @@ def compute_character_diff(
         slot_deltas=slot_deltas,
         pact_slot_deltas=pact_slot_deltas,
         new_spells=new_spells,
+        removed_spells=removed_spells,
         asi_summary=asi_summary,
     )
 
@@ -359,6 +373,15 @@ def render_diff_html(diff: CharacterDiff) -> str:
         parts.append("<h3>New Spells</h3><ul>")
         for sname, src in diff.new_spells:
             parts.append(f"<li><b>{html.escape(sname)}</b> <span style='color:#94a3b8;'>({html.escape(src)})</span></li>")
+        parts.append("</ul>")
+
+    if diff.removed_spells:
+        parts.append("<h3>Removed Spells</h3><ul>")
+        for sname, src in diff.removed_spells:
+            parts.append(
+                f"<li><span style='color:#f87171;'>− {html.escape(sname)}</span> "
+                f"<span style='color:#94a3b8;'>({html.escape(src)})</span></li>"
+            )
         parts.append("</ul>")
 
     return "".join(parts)
