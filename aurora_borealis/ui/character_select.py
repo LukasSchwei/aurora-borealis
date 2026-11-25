@@ -36,9 +36,12 @@ class CharacterSelectView(QWidget):
     """Screen 1: Folder-based character selection grid."""
 
     open_character_requested = Signal(Path)
+    open_companion_requested = Signal(Path)
     new_character_requested = Signal()
+    new_companion_requested = Signal()
     import_dnd5e_requested = Signal()
     export_pdf_requested = Signal(Path)
+    export_companion_pdf_requested = Signal(Path)
     duplicate_character_requested = Signal(Path)
     delete_character_requested = Signal(Path)
     toggle_favorite_requested = Signal(str)
@@ -90,14 +93,17 @@ class CharacterSelectView(QWidget):
 
         self.btn_github = QPushButton("Additional Content (GitHub)")
         self.btn_github.clicked.connect(self.open_github_requested.emit)
-        btn_import = QPushButton("Import .dnd5e")
+        btn_import = QPushButton("Import .dnd5e / .dnd55e / .dndcomp")
         btn_import.clicked.connect(self.import_dnd5e_requested.emit)
+        btn_new_comp = QPushButton("+ New Companion")
+        btn_new_comp.clicked.connect(self.new_companion_requested.emit)
         btn_new = QPushButton("+ New Character")
         btn_new.setObjectName("PrimaryBtn")
         btn_new.clicked.connect(self.new_character_requested.emit)
 
         top_layout.addWidget(self.btn_github)
         top_layout.addWidget(btn_import)
+        top_layout.addWidget(btn_new_comp)
         top_layout.addWidget(btn_new)
         root.addWidget(top_bar)
 
@@ -130,10 +136,13 @@ class CharacterSelectView(QWidget):
         self.btn_all.clicked.connect(lambda: self._set_filter("all"))
         self.btn_fav = QPushButton("★ Favorites (0)")
         self.btn_fav.clicked.connect(lambda: self._set_filter("fav"))
+        self.btn_comp = QPushButton("🐾 Companions (0)")
+        self.btn_comp.clicked.connect(lambda: self._set_filter("comp"))
 
         sub_layout.addWidget(self.txt_search)
         sub_layout.addWidget(self.btn_all)
         sub_layout.addWidget(self.btn_fav)
+        sub_layout.addWidget(self.btn_comp)
         root.addWidget(sub_bar)
 
         # Scrollable Character Grid
@@ -164,18 +173,20 @@ class CharacterSelectView(QWidget):
     def set_characters(self, summaries: list[CharacterSummary]) -> None:
         self._summaries = list(summaries)
         fav_count = sum(1 for s in summaries if s.favorite)
+        comp_count = sum(1 for s in summaries if s.entry_kind == "companion")
         self.btn_all.setText(f"All ({len(summaries)})")
         self.btn_fav.setText(f"★ Favorites ({fav_count})")
+        self.btn_comp.setText(f"🐾 Companions ({comp_count})")
         self._render_cards()
 
     def _set_filter(self, mode: str) -> None:
         self._filter_mode = mode
         self.btn_all.setObjectName("PrimaryBtn" if mode == "all" else "")
         self.btn_fav.setObjectName("PrimaryBtn" if mode == "fav" else "")
-        self.btn_all.style().unpolish(self.btn_all)
-        self.btn_all.style().polish(self.btn_all)
-        self.btn_fav.style().unpolish(self.btn_fav)
-        self.btn_fav.style().polish(self.btn_fav)
+        self.btn_comp.setObjectName("PrimaryBtn" if mode == "comp" else "")
+        for btn in (self.btn_all, self.btn_fav, self.btn_comp):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
         self._render_cards()
 
     def set_ui_scale(self, scale: float) -> None:
@@ -212,6 +223,8 @@ class CharacterSelectView(QWidget):
         for s in self._summaries:
             if self._filter_mode == "fav" and not s.favorite:
                 continue
+            if self._filter_mode == "comp" and s.entry_kind != "companion":
+                continue
             if q and q not in f"{s.name} {s.race} {s.class_name} {s.background} {s.ruleset}".lower():
                 continue
             filtered.append(s)
@@ -235,10 +248,14 @@ class CharacterSelectView(QWidget):
         self.grid.addWidget(new_btn, r_new, c_new)
 
     def _make_card(self, s: CharacterSummary, card_sz: int) -> QFrame:
+        is_comp = s.entry_kind == "companion"
+        open_sig = self.open_companion_requested if is_comp else self.open_character_requested
+        pdf_sig = self.export_companion_pdf_requested if is_comp else self.export_pdf_requested
+
         card = _ClickableCard()
         card.setObjectName("CharCard")
         card.setCursor(Qt.CursorShape.PointingHandCursor)
-        card.clicked.connect(lambda: self.open_character_requested.emit(s.path))
+        card.clicked.connect(lambda: open_sig.emit(s.path))
         card.setFixedSize(card_sz, card_sz)
 
         vbox = QVBoxLayout(card)
@@ -251,7 +268,7 @@ class CharacterSelectView(QWidget):
         portrait_btn.setObjectName("CharPortraitBtn")
         portrait_btn.setFixedHeight(portrait_h)
         portrait_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        portrait_btn.clicked.connect(lambda: self.open_character_requested.emit(s.path))
+        portrait_btn.clicked.connect(lambda: open_sig.emit(s.path))
 
         pix = pixmap_from_portrait(s.portrait_base64, s.portrait_path, size=card_sz)
         if pix:
@@ -310,11 +327,11 @@ class CharacterSelectView(QWidget):
 
         btn_open = QPushButton("Open")
         btn_open.setObjectName("PrimaryBtn")
-        btn_open.clicked.connect(lambda: self.open_character_requested.emit(s.path))
+        btn_open.clicked.connect(lambda: open_sig.emit(s.path))
 
         btn_pdf = QPushButton("PDF")
         btn_pdf.setObjectName("CompactCardBtn")
-        btn_pdf.clicked.connect(lambda: self.export_pdf_requested.emit(s.path))
+        btn_pdf.clicked.connect(lambda: pdf_sig.emit(s.path))
 
         btn_dup = QPushButton("Copy")
         btn_dup.setObjectName("CompactCardBtn")

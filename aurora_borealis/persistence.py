@@ -8,9 +8,9 @@ from pathlib import Path
 
 from lxml import etree
 
-from .engine import RulesEngine
+from .engine import RulesEngine, class_display_summary
 from .loader import ContentRepository
-from .models import ABILITIES, CharacterState, ComputedCharacter, InventoryItem
+from .models import ABILITIES, CharacterState, ClassLevel, ComputedCharacter, InventoryItem
 
 
 def encode_portrait_file(image_path: Path) -> str:
@@ -39,6 +39,11 @@ def encode_portrait_file(image_path: Path) -> str:
     return base64.b64encode(image_path.read_bytes()).decode("ascii")
 
 
+def default_character_extension(ruleset: str) -> str:
+    """Return '.dnd55e' for 5.5e characters and '.dnd5e' for 5e characters."""
+    return ".dnd55e" if (ruleset or "").strip() == "5.5e" else ".dnd5e"
+
+
 def save_dnd5e(
     state: CharacterState,
     repo: ContentRepository,
@@ -46,17 +51,24 @@ def save_dnd5e(
     path: Path,
 ) -> None:
     path = Path(path)
-    root = etree.Element("character", version="0.2", preview="false")
+    fmt = "dnd55e" if state.ruleset == "5.5e" else "dnd5e"
+    root = etree.Element("character", version="0.2", preview="false", format=fmt)
 
     # Display properties
     disp = etree.SubElement(root, "display-properties", favorite="false")
     etree.SubElement(disp, "name").text = state.name
     race_el = repo.get(state.race_id)
-    class_el = repo.get(state.class_id)
+    norm_classes = state.normalized_classes()
+    class_el = repo.get(norm_classes[0].class_id) if norm_classes else repo.get(state.class_id)
     bg_el = repo.get(state.background_id)
     etree.SubElement(disp, "race").text = race_el.name if race_el else ""
-    etree.SubElement(disp, "class").text = class_el.name if class_el else ""
-    etree.SubElement(disp, "archetype").text = ""
+    if len(norm_classes) > 1:
+        disp_class = class_display_summary(state, repo)
+    else:
+        disp_class = class_el.name if class_el else ""
+    etree.SubElement(disp, "class").text = disp_class
+    archetypes = [e.name for e in computed.granted_elements if e.type == "Archetype"]
+    etree.SubElement(disp, "archetype").text = ", ".join(archetypes)
     etree.SubElement(disp, "background").text = bg_el.name if bg_el else ""
     etree.SubElement(disp, "level").text = str(state.level)
     etree.SubElement(disp, "experience").text = str(state.xp)
@@ -116,7 +128,6 @@ def save_dnd5e(
     etree.SubElement(elems_node, "element", type="Level", name=str(state.level), id=f"ID_INTERNAL_LEVEL_{state.level}")
     for etype, eid in (
         ("Race", state.race_id),
-        ("Class", state.class_id),
         ("Background", state.background_id),
         ("Alignment", state.alignment_id),
         ("Deity", state.deity_id),
@@ -131,6 +142,37 @@ def save_dnd5e(
                 id=eid,
                 registered="true",
             )
+    for idx, cl in enumerate(norm_classes):
+        cel = repo.get(cl.class_id)
+        etree.SubElement(
+            elems_node,
+            "element",
+            type="Class",
+            name=cel.name if cel else cl.class_id,
+            id=cl.class_id,
+            level=str(cl.level),
+            primary="true" if idx == 0 else "false",
+            registered="true",
+        )
+
+    # Hit Points mode, level order, and rolled/manual per-level rolls
+    hp_node = etree.SubElement(build, "hit-points", mode=state.hp_mode or "average")
+    for lvl_idx, cid in enumerate(state.normalized_level_order(), start=1):
+        attrs = {"level": str(lvl_idx), "class-id": cid}
+        if lvl_idx in state.hp_rolls:
+            attrs["roll"] = str(state.hp_rolls[lvl_idx])
+        etree.SubElement(hp_node, "level-entry", **attrs)
+
+    # Level-Up Wizard ASI & Feat overrides
+    if state.level_up_asi or state.level_up_feats:
+        lu_node = etree.SubElement(build, "level-ups")
+        for key, asi_map in sorted(state.level_up_asi.items()):
+            for ab, val in sorted(asi_map.items()):
+                if val:
+                    etree.SubElement(lu_node, "asi", key=key, ability=ab, value=str(val))
+        for key, fid in sorted(state.level_up_feats.items()):
+            if fid:
+                etree.SubElement(lu_node, "feat", key=key, id=fid)
 
     # Persist user selections cleanly
     selections_node = etree.SubElement(build, "selections")
@@ -188,7 +230,53 @@ def save_dnd5e(
                 "known": "true" if sid in state.known_spells else "false",
                 "prepared": "true" if sid in prepared_set else "false",
             }
+            if sid in state.spell_sources and state.spell_sources[sid]:
+                s_attrs["source-class"] = state.spell_sources[sid]
             etree.SubElement(spells_node, "spell", **s_attrs)
+
+    # 5.5e rules state
+    r55 = etree.SubElement(
+        build,
+        "rules-55e",
+        {
+            "heroic-inspiration": "true" if state.heroic_inspiration else "false",
+            "exhaustion": str(max(0, min(6, int(state.exhaustion_level or 0)))),
+            "divine-order": state.divine_order_55e,
+            "primal-order": state.primal_order_55e,
+        },
+    )
+    for wm in state.weapon_masteries:
+        if wm:
+            etree.SubElement(r55, "weapon-mastery").text = wm
+
+    # Manual rule overrides
+    if state.rule_overrides or state.allow_extra_spells:
+        ov_node = etree.SubElement(build, "rule-overrides")
+        merged_ov = dict(state.rule_overrides)
+        if state.allow_extra_spells:
+            merged_ov["allow_extra_spells"] = True
+        for k, v in sorted(merged_ov.items()):
+            etree.SubElement(ov_node, "override", key=k, value="true" if v else "false")
+
+    # Animal Forms / Wild Shape
+    if state.animal_forms or state.active_animal_form_id or state.custom_animal_forms:
+        import json
+
+        af_node = etree.SubElement(build, "animal-forms", active=state.active_animal_form_id)
+        for fid in state.animal_forms:
+            if fid:
+                etree.SubElement(af_node, "form", id=fid)
+        for cf in state.custom_animal_forms:
+            if isinstance(cf, dict):
+                etree.SubElement(af_node, "custom-form").text = json.dumps(cf, ensure_ascii=False)
+
+    # Attached Companions
+    if state.companions:
+        import json
+
+        comp_node = etree.SubElement(build, "companions")
+        for cdata in state.companions:
+            etree.SubElement(comp_node, "companion").text = json.dumps(cdata, ensure_ascii=False)
 
     xml_bytes = etree.tostring(root, encoding="utf-8", xml_declaration=True, pretty_print=True)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -296,6 +384,8 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                         state.background_asi[ab] = val
 
     legacy_element_ids: list[str] = []
+    parsed_classes: list[tuple[bool, ClassLevel]] = []
+    has_explicit_class_levels = False
     elems_node = build.find("elements")
     if elems_node is not None:
         max_lvl = 0
@@ -311,8 +401,16 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                 continue
             if etype == "Race" and not state.race_id:
                 state.race_id = eid
-            elif etype == "Class" and not state.class_id:
-                state.class_id = eid
+            elif etype == "Class":
+                if not state.class_id:
+                    state.class_id = eid
+                lvl_attr = (el.get("level") or "").strip()
+                is_prim = (el.get("primary") or "").strip().lower() == "true"
+                if lvl_attr.isdigit():
+                    has_explicit_class_levels = True
+                    parsed_classes.append((is_prim, ClassLevel(eid, max(1, min(20, int(lvl_attr))))))
+                else:
+                    parsed_classes.append((is_prim or len(parsed_classes) == 0, ClassLevel(eid, 1)))
             elif etype == "Background" and not state.background_id:
                 state.background_id = eid
             elif etype == "Alignment" and not state.alignment_id:
@@ -325,6 +423,51 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                     max_lvl = max(max_lvl, int(name_txt))
         if max_lvl > 0:
             state.level = max(1, min(20, max_lvl))
+
+    if parsed_classes:
+        if has_explicit_class_levels or len(parsed_classes) > 1:
+            ordered_mc = [cl for prim, cl in parsed_classes if prim] + [cl for prim, cl in parsed_classes if not prim]
+            state.classes = ordered_mc
+            state.sync_from_classes()
+        elif state.class_id:
+            state.classes = [ClassLevel(state.class_id, state.level)]
+            state.sync_from_classes()
+
+    hp_node = build.find("hit-points")
+    if hp_node is not None:
+        mode = (hp_node.get("mode") or "average").strip().lower()
+        state.hp_mode = "rolled" if mode == "rolled" else "average"
+        entries: list[tuple[int, str, Optional[int]]] = []
+        for entry in hp_node.findall("level-entry"):
+            lvl_s = (entry.get("level") or "").strip()
+            cid = (entry.get("class-id") or "").strip()
+            roll_s = (entry.get("roll") or "").strip()
+            if lvl_s.isdigit():
+                lvl_i = int(lvl_s)
+                roll_i = int(roll_s) if roll_s.lstrip("-").isdigit() else None
+                entries.append((lvl_i, cid, roll_i))
+        entries.sort(key=lambda x: x[0])
+        if entries:
+            order_cids = [cid for _, cid, _ in entries if cid]
+            if order_cids:
+                state.level_order = order_cids
+            for lvl_i, _cid, roll_i in entries:
+                if roll_i is not None:
+                    state.hp_rolls[lvl_i] = roll_i
+
+    lu_node = build.find("level-ups")
+    if lu_node is not None:
+        for asi in lu_node.findall("asi"):
+            key = (asi.get("key") or "").strip()
+            ab = (asi.get("ability") or "").strip().lower()
+            val_s = (asi.get("value") or "").strip()
+            if key and ab in ABILITIES and val_s.lstrip("-").isdigit():
+                state.level_up_asi.setdefault(key, {})[ab] = int(val_s)
+        for ft in lu_node.findall("feat"):
+            key = (ft.get("key") or "").strip()
+            fid = (ft.get("id") or "").strip()
+            if key and fid:
+                state.level_up_feats[key] = fid
 
     sum_node = build.find("sum")
     if sum_node is not None:
@@ -419,5 +562,66 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                 state.known_spells.append(sid)
             if is_prep and sid not in state.prepared_spells:
                 state.prepared_spells.append(sid)
+            src_cls = (sp.get("source-class") or "").strip()
+            if src_cls:
+                state.spell_sources[sid] = src_cls
+
+    r55 = build.find("rules-55e")
+    if r55 is not None:
+        state.heroic_inspiration = (r55.get("heroic-inspiration") or "false").lower() == "true"
+        ex_s = (r55.get("exhaustion") or "0").strip()
+        if ex_s.isdigit():
+            state.exhaustion_level = max(0, min(6, int(ex_s)))
+        state.divine_order_55e = (r55.get("divine-order") or "").strip()
+        state.primal_order_55e = (r55.get("primal-order") or "").strip()
+        state.weapon_masteries = [
+            (wm.text or "").strip()
+            for wm in r55.findall("weapon-mastery")
+            if (wm.text or "").strip()
+        ]
+
+    ov_node = build.find("rule-overrides")
+    if ov_node is not None:
+        for ov in ov_node.findall("override"):
+            k = (ov.get("key") or "").strip()
+            v = (ov.get("value") or "false").lower() == "true"
+            if k:
+                state.set_override(k, v)
+    elif state.allow_extra_spells:
+        state.rule_overrides["allow_extra_spells"] = True
+
+    af_node = build.find("animal-forms")
+    if af_node is not None:
+        import json
+
+        state.active_animal_form_id = (af_node.get("active") or "").strip()
+        state.animal_forms = [
+            (fn.get("id") or "").strip()
+            for fn in af_node.findall("form")
+            if (fn.get("id") or "").strip()
+        ]
+        for cfn in af_node.findall("custom-form"):
+            raw_txt = (cfn.text or "").strip()
+            if raw_txt:
+                try:
+                    obj = json.loads(raw_txt)
+                    if isinstance(obj, dict):
+                        state.custom_animal_forms.append(obj)
+                except Exception:
+                    pass
+
+    comp_node = build.find("companions")
+    if comp_node is not None:
+        import json
+
+        for cn in comp_node.findall("companion"):
+            raw_txt = (cn.text or "").strip()
+            if raw_txt:
+                try:
+                    obj = json.loads(raw_txt)
+                    if isinstance(obj, dict):
+                        state.companions.append(obj)
+                except Exception:
+                    pass
 
     return state

@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import functools
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from lxml import etree
 
-from .models import DuplicateEntry, Element, GrantRule, SelectRule, SpellcastingInfo, StatRule
+from .models import (
+    DuplicateEntry,
+    Element,
+    GrantRule,
+    MulticlassInfo,
+    SelectRule,
+    SpellcastingInfo,
+    StatRule,
+)
 
 _EXPR_TOKEN_RE = re.compile(r"\s*(\|\||&&|\(|\)|,|!|[^|&(),!]+)")
 
@@ -76,15 +85,12 @@ def _inner_html(node: Optional[etree._Element]) -> str:
     return "".join(parts).strip()
 
 
-def evaluate_boolean_expr(expr: str, predicate: Callable[[str], bool]) -> bool:
-    """Evaluate Aurora boolean expressions supporting ',', '&&', '||', '!', and '()'."""
-    expr = (expr or "").strip()
-    if not expr:
-        return True
-
+@functools.lru_cache(maxsize=1024)
+def _compile_boolean_expr(expr: str) -> Any:
+    """Compile an Aurora boolean expression into a cached AST tuple."""
     tokens = [t.strip() for t in _EXPR_TOKEN_RE.findall(expr) if t.strip()]
     if not tokens:
-        return True
+        return ("CONST", True)
 
     pos = 0
 
@@ -97,44 +103,68 @@ def evaluate_boolean_expr(expr: str, predicate: Callable[[str], bool]) -> bool:
         pos += 1
         return tok
 
-    def parse_or() -> bool:
-        val = parse_and()
+    def parse_or() -> Any:
+        node = parse_and()
         while peek() == "||":
             consume()
             rhs = parse_and()
-            val = val or rhs
-        return val
+            node = ("OR", node, rhs)
+        return node
 
-    def parse_and() -> bool:
-        val = parse_not()
+    def parse_and() -> Any:
+        node = parse_not()
         while peek() in (",", "&&"):
             consume()
             rhs = parse_not()
-            val = val and rhs
-        return val
+            node = ("AND", node, rhs)
+        return node
 
-    def parse_not() -> bool:
+    def parse_not() -> Any:
         if peek() == "!":
             consume()
-            return not parse_not()
+            return ("NOT", parse_not())
         return parse_primary()
 
-    def parse_primary() -> bool:
+    def parse_primary() -> Any:
         tok = peek()
         if tok is None:
-            return True
+            return ("CONST", True)
         if tok == "(":
             consume()
-            val = parse_or()
+            node = parse_or()
             if peek() == ")":
                 consume()
-            return val
+            return node
         if tok in (")", ",", "&&", "||"):
-            return True
+            return ("CONST", True)
         consume()
-        return predicate(tok)
+        return ("TERM", tok)
 
     return parse_or()
+
+
+def _eval_ast(node: Any, predicate: Callable[[str], bool]) -> bool:
+    kind = node[0]
+    if kind == "CONST":
+        return node[1]
+    if kind == "TERM":
+        return predicate(node[1])
+    if kind == "NOT":
+        return not _eval_ast(node[1], predicate)
+    if kind == "AND":
+        return _eval_ast(node[1], predicate) and _eval_ast(node[2], predicate)
+    if kind == "OR":
+        return _eval_ast(node[1], predicate) or _eval_ast(node[2], predicate)
+    return True
+
+
+def evaluate_boolean_expr(expr: str, predicate: Callable[[str], bool]) -> bool:
+    """Evaluate Aurora boolean expressions supporting ',', '&&', '||', '!', and '()'."""
+    expr = (expr or "").strip()
+    if not expr:
+        return True
+    ast = _compile_boolean_expr(expr)
+    return _eval_ast(ast, predicate)
 
 
 class ContentRepository:
@@ -147,6 +177,10 @@ class ContentRepository:
         self.file_count: int = 0
         self.duplicates: list[DuplicateEntry] = []
         self._by_type_name: dict[tuple[str, str], Element] = {}
+        self._type_by_id: dict[str, dict[str, Element]] = defaultdict(dict)
+        self._search_blobs: dict[str, str] = {}
+        self._support_tokens: dict[str, frozenset[str]] = {}
+        self._match_cache: dict[tuple[str, str], tuple[Element, ...]] = {}
 
     def clear(self) -> None:
         self.by_id.clear()
@@ -155,12 +189,46 @@ class ContentRepository:
         self.file_count = 0
         self.duplicates.clear()
         self._by_type_name.clear()
+        self._type_by_id.clear()
+        self._search_blobs.clear()
+        self._support_tokens.clear()
+        self._match_cache.clear()
 
     def duplicate_summary(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
         for d in self.duplicates:
             counts[d.element_type] += 1
         return dict(sorted(counts.items()))
+
+    def _sync_type_lists_and_caches(self, affected_types: Optional[Iterable[str]] = None) -> None:
+        types_to_sync = affected_types if affected_types is not None else list(self._type_by_id.keys())
+        for etype in types_to_sync:
+            elems = list(self._type_by_id.get(etype, {}).values())
+            elems.sort(key=lambda e: (e.name.lower(), e.id))
+            self.by_type[etype] = elems
+        self._match_cache.clear()
+
+    def _index_element_metadata(self, el: Element) -> None:
+        self._search_blobs[el.id] = (
+            f"{el.name}\n{el.id}\n{el.source}\n{' '.join(el.supports)}".lower()
+        )
+        tokens = {
+            el.id.lower(),
+            el.name.lower(),
+            el.type.lower(),
+            el.source.lower(),
+            *(s.lower() for s in el.supports),
+        }
+        if el.type == "Spell":
+            lvl = el.setters.get("level", "").strip().lower()
+            if lvl:
+                tokens.add(lvl)
+            school = el.setters.get("school", "").strip().lower()
+            if school:
+                tokens.add(school)
+            if el.setters.get("isRitual", "").strip().lower() == "true":
+                tokens.add("ritual")
+        self._support_tokens[el.id] = frozenset(tokens)
 
     def load_directory(self, directory: Path) -> int:
         directory = Path(directory)
@@ -176,8 +244,7 @@ class ContentRepository:
             if loaded > 0:
                 self.file_count += 1
                 count += loaded
-        for elems in self.by_type.values():
-            elems.sort(key=lambda e: (e.name.lower(), e.id))
+        self._sync_type_lists_and_caches()
         return count
 
     def load_directories(self, directories: Iterable[Path]) -> int:
@@ -216,9 +283,9 @@ class ContentRepository:
                             file_path=str(path),
                         )
                     )
-                    if old in self.by_type[old.type]:
-                        self.by_type[old.type].remove(old)
+                    self._type_by_id[old.type].pop(old.id, None)
                     self.by_id[el.id] = el
+                    self._index_element_metadata(el)
                     self._register_in_type_list(el, path)
                 else:
                     self.duplicates.append(
@@ -236,22 +303,22 @@ class ContentRepository:
                 continue
 
             self.by_id[el.id] = el
+            self._index_element_metadata(el)
             self._register_in_type_list(el, path)
             added += 1
         return added
 
     def _register_in_type_list(self, el: Element, path: Path) -> None:
         if el.type not in _CHARACTER_FACING_TYPES:
-            if el not in self.by_type[el.type]:
-                self.by_type[el.type].append(el)
+            self._type_by_id[el.type][el.id] = el
             return
 
         tn_key = (el.type.lower(), el.name.lower())
         existing = self._by_type_name.get(tn_key)
         if existing is None or existing.id == el.id:
-            if existing is not None and existing in self.by_type[existing.type]:
-                self.by_type[existing.type].remove(existing)
-            self.by_type[el.type].append(el)
+            if existing is not None:
+                self._type_by_id[existing.type].pop(existing.id, None)
+            self._type_by_id[el.type][el.id] = el
             self._by_type_name[tn_key] = el
             return
 
@@ -269,9 +336,8 @@ class ContentRepository:
                     file_path=str(path),
                 )
             )
-            if existing in self.by_type[existing.type]:
-                self.by_type[existing.type].remove(existing)
-            self.by_type[el.type].append(el)
+            self._type_by_id[existing.type].pop(existing.id, None)
+            self._type_by_id[el.type][el.id] = el
             self._by_type_name[tn_key] = el
         else:
             self.duplicates.append(
@@ -285,6 +351,68 @@ class ContentRepository:
                     file_path=str(path),
                 )
             )
+
+    @staticmethod
+    def _parse_rules(
+        rules_node: Optional[etree._Element],
+    ) -> tuple[list[GrantRule], list[SelectRule], list[StatRule]]:
+        grant_rules: list[GrantRule] = []
+        select_rules: list[SelectRule] = []
+        stat_rules: list[StatRule] = []
+
+        if rules_node is None:
+            return grant_rules, select_rules, stat_rules
+
+        for r in rules_node:
+            if r.tag == "grant":
+                gid = (r.get("id") or "").strip()
+                gtype = (r.get("type") or "").strip()
+                if gid:
+                    grant_rules.append(
+                        GrantRule(
+                            type=gtype,
+                            id=gid,
+                            level=_parse_int(r.get("level"), 1),
+                            requirements=(r.get("requirements") or "").strip(),
+                        )
+                    )
+            elif r.tag == "select":
+                stype = (r.get("type") or "").strip()
+                sname = (r.get("name") or stype).strip()
+                items: list[tuple[str, str]] = []
+                for item_node in r.findall("item"):
+                    iid = (item_node.get("id") or "").strip()
+                    itext = (item_node.text or "").strip()
+                    if iid or itext:
+                        items.append((iid or itext, itext or iid))
+                select_rules.append(
+                    SelectRule(
+                        type=stype,
+                        name=sname,
+                        number=max(1, _parse_int(r.get("number"), 1)),
+                        supports=(r.get("supports") or "").strip(),
+                        level=_parse_int(r.get("level"), 1),
+                        requirements=(r.get("requirements") or "").strip(),
+                        optional=(r.get("optional") or "").lower() == "true",
+                        items=items,
+                        default=(r.get("default") or "").strip(),
+                    )
+                )
+            elif r.tag == "stat":
+                st_name = (r.get("name") or "").strip()
+                st_val = (r.get("value") or "").strip()
+                if st_name and st_val:
+                    stat_rules.append(
+                        StatRule(
+                            name=st_name,
+                            value=st_val,
+                            bonus=(r.get("bonus") or "").strip(),
+                            level=_parse_int(r.get("level"), 1),
+                            requirements=(r.get("requirements") or "").strip(),
+                            equipped=(r.get("equipped") or "").strip(),
+                        )
+                    )
+        return grant_rules, select_rules, stat_rules
 
     def _parse_element(self, node: etree._Element) -> Optional[Element]:
         el_id = (node.get("id") or "").strip()
@@ -319,67 +447,18 @@ class ContentRepository:
                     if sname == "damage" and s.get("type"):
                         setters["damage_type"] = s.get("type", "")
 
-        grant_rules: list[GrantRule] = []
-        select_rules: list[SelectRule] = []
-        stat_rules: list[StatRule] = []
-
-        rules_node = node.find("rules")
-        if rules_node is not None:
-            for r in rules_node:
-                if r.tag == "grant":
-                    gid = (r.get("id") or "").strip()
-                    gtype = (r.get("type") or "").strip()
-                    if gid:
-                        grant_rules.append(
-                            GrantRule(
-                                type=gtype,
-                                id=gid,
-                                level=_parse_int(r.get("level"), 1),
-                                requirements=(r.get("requirements") or "").strip(),
-                            )
-                        )
-                elif r.tag == "select":
-                    stype = (r.get("type") or "").strip()
-                    sname = (r.get("name") or stype).strip()
-                    items: list[tuple[str, str]] = []
-                    for item_node in r.findall("item"):
-                        iid = (item_node.get("id") or "").strip()
-                        itext = (item_node.text or "").strip()
-                        if iid or itext:
-                            items.append((iid or itext, itext or iid))
-                    select_rules.append(
-                        SelectRule(
-                            type=stype,
-                            name=sname,
-                            number=max(1, _parse_int(r.get("number"), 1)),
-                            supports=(r.get("supports") or "").strip(),
-                            level=_parse_int(r.get("level"), 1),
-                            requirements=(r.get("requirements") or "").strip(),
-                            optional=(r.get("optional") or "").lower() == "true",
-                            items=items,
-                            default=(r.get("default") or "").strip(),
-                        )
-                    )
-                elif r.tag == "stat":
-                    st_name = (r.get("name") or "").strip()
-                    st_val = (r.get("value") or "").strip()
-                    if st_name and st_val:
-                        stat_rules.append(
-                            StatRule(
-                                name=st_name,
-                                value=st_val,
-                                bonus=(r.get("bonus") or "").strip(),
-                                level=_parse_int(r.get("level"), 1),
-                                requirements=(r.get("requirements") or "").strip(),
-                                equipped=(r.get("equipped") or "").strip(),
-                            )
-                        )
+        grant_rules, select_rules, stat_rules = self._parse_rules(node.find("rules"))
 
         spellcasting: Optional[SpellcastingInfo] = None
         sc_node = node.find("spellcasting")
         if sc_node is not None:
             list_node = sc_node.find("list")
             spell_list = (list_node.text or "").strip() if list_node is not None else ""
+            extended = [
+                (ex.text or "").strip()
+                for ex in sc_node.findall("extend")
+                if (ex.text or "").strip()
+            ]
             spellcasting = SpellcastingInfo(
                 name=(sc_node.get("name") or name).strip(),
                 ability=(sc_node.get("ability") or "Intelligence").strip(),
@@ -387,6 +466,20 @@ class ContentRepository:
                 allow_rituals=(sc_node.get("allowRituals") or "").lower() == "true",
                 extend=(sc_node.get("extend") or "").lower() == "true",
                 spell_list=spell_list or (sc_node.get("name") or "").strip(),
+                extended=extended,
+            )
+
+        multiclass: Optional[MulticlassInfo] = None
+        mc_node = node.find("multiclass")
+        if mc_node is not None:
+            mc_grants, mc_selects, mc_stats = self._parse_rules(mc_node.find("rules"))
+            multiclass = MulticlassInfo(
+                id=(mc_node.get("id") or "").strip(),
+                prerequisite=(mc_node.findtext("prerequisite") or "").strip(),
+                requirements=(mc_node.findtext("requirements") or "").strip(),
+                grant_rules=mc_grants,
+                select_rules=mc_selects,
+                stat_rules=mc_stats,
             )
 
         return Element(
@@ -402,6 +495,7 @@ class ContentRepository:
             select_rules=select_rules,
             stat_rules=stat_rules,
             spellcasting=spellcasting,
+            multiclass=multiclass,
         )
 
     def get(self, element_id: str) -> Optional[Element]:
@@ -418,32 +512,50 @@ class ContentRepository:
         if not expr:
             return True
 
-        tokens_lower = {
-            element.id.lower(),
-            element.name.lower(),
-            element.type.lower(),
-            element.source.lower(),
-            *(s.lower() for s in element.supports),
-        }
-        if element.type == "Spell":
-            lvl = element.setters.get("level", "").strip().lower()
-            if lvl:
-                tokens_lower.add(lvl)
-            school = element.setters.get("school", "").strip().lower()
-            if school:
-                tokens_lower.add(school)
-            if element.setters.get("isRitual", "").strip().lower() == "true":
-                tokens_lower.add("ritual")
+        tokens_lower = self._support_tokens.get(element.id)
+        if tokens_lower is None:
+            self._index_element_metadata(element)
+            tokens_lower = self._support_tokens[element.id]
         return evaluate_boolean_expr(
             expr,
             lambda term: term.lower() in tokens_lower,
         )
 
     def find_matching(self, element_type: str, supports_expr: str = "") -> list[Element]:
-        candidates = self.of_type(element_type)
-        if not supports_expr:
-            return candidates
-        return [el for el in candidates if self.match_supports(el, supports_expr)]
+        key = (element_type, (supports_expr or "").strip())
+        cached = self._match_cache.get(key)
+        if cached is not None:
+            return list(cached)
+        candidates = self.by_type.get(element_type, [])
+        if not key[1]:
+            res = tuple(candidates)
+        else:
+            res = tuple(el for el in candidates if self.match_supports(el, key[1]))
+        if len(self._match_cache) > 2048:
+            self._match_cache.clear()
+        self._match_cache[key] = res
+        return list(res)
+
+    def available_spell_classes(self) -> list[str]:
+        """Return sorted D&D spellcasting class names present across standard + loaded spells."""
+        base = {
+            "Artificer",
+            "Bard",
+            "Cleric",
+            "Druid",
+            "Paladin",
+            "Ranger",
+            "Sorcerer",
+            "Warlock",
+            "Wizard",
+        }
+        known_lower = {b.lower(): b for b in base}
+        for sp in self.by_type.get("Spell", []):
+            for tok in sp.supports:
+                tl = tok.strip().lower()
+                if tl in known_lower:
+                    base.add(known_lower[tl])
+        return sorted(base)
 
     def search(
         self,
@@ -453,21 +565,25 @@ class ContentRepository:
         q = query.strip().lower()
         if element_types is not None:
             pool: list[Element] = []
-            for t in element_types:
+            type_list = list(element_types)
+            for t in type_list:
                 pool.extend(self.by_type.get(t, []))
+            if not q and len(type_list) == 1:
+                return list(pool)
         else:
             pool = list(self.by_id.values())
 
         if not q:
             return sorted(pool, key=lambda e: (e.name.lower(), e.id))
-        return sorted(
-            [
-                el
-                for el in pool
-                if q in el.name.lower()
-                or q in el.id.lower()
-                or q in el.source.lower()
-                or any(q in s.lower() for s in el.supports)
-            ],
-            key=lambda e: (e.name.lower(), e.id),
-        )
+
+        blobs = self._search_blobs
+        out: list[Element] = []
+        for el in pool:
+            blob = blobs.get(el.id)
+            if blob is None:
+                self._index_element_metadata(el)
+                blob = self._search_blobs[el.id]
+            if q in blob:
+                out.append(el)
+        out.sort(key=lambda e: (e.name.lower(), e.id))
+        return out

@@ -91,7 +91,14 @@ def _safe_rel_path(raw_name: str, fallback_url: str, root_base_url: str = "") ->
     if not candidate:
         candidate = Path(parsed_url.path).name or "elements.xml"
 
-    parts = [p for p in Path(candidate).parts if p not in ("", ".", "..", "/")]
+    parts: list[str] = []
+    for raw_part in candidate.replace("\\", "/").split("/"):
+        cleaned = re.sub(r'[<>:"|?*]', "_", raw_part).strip()
+        if cleaned in ("", ".", ".."):
+            continue
+        if len(cleaned) == 2 and cleaned[1] == ":":
+            continue
+        parts.append(cleaned)
     if not parts:
         parts = ["elements.xml"]
     rel = Path(*parts)

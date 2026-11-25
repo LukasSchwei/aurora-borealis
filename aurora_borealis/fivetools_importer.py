@@ -294,6 +294,20 @@ def _convert_spells(data: dict) -> list[etree._Element]:
         eid = f"ID_5ETOOLS_SPELL_{_slug(src)}_{_slug(name)}"
         el = _new_element(name, "Spell", f"5e.tools ({src})", eid)
         _set_description(el, render_5etools_entries(sp.get("entries", [])))
+        class_tags: list[str] = []
+        classes_obj = sp.get("classes")
+        if isinstance(classes_obj, dict):
+            from_list = classes_obj.get("fromClassList")
+            if isinstance(from_list, list):
+                seen_cls: set[str] = set()
+                for entry in from_list:
+                    if isinstance(entry, dict):
+                        cname = str(entry.get("name") or "").strip()
+                        if cname and cname.lower() not in seen_cls:
+                            seen_cls.add(cname.lower())
+                            class_tags.append(cname)
+        if class_tags:
+            etree.SubElement(el, "supports").text = ", ".join(class_tags)
         setters = etree.SubElement(el, "setters")
         etree.SubElement(setters, "set", name="level").text = str(sp.get("level", 0))
         school = _SPELL_SCHOOL_MAP.get(str(sp.get("school", "")).upper(), str(sp.get("school", "")))

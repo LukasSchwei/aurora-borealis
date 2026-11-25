@@ -14,9 +14,13 @@ from typing import Optional
 from PySide6.QtCore import QMarginsF, QRectF, QSizeF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
 
+from .animal_forms import find_animal_form
+from .engine import class_display_summary
 from .loader import ContentRepository
 from .models import ABILITIES, ABILITY_ABBR, SKILLS, CharacterState, ComputedCharacter
 from .paths import get_templates_dir
+from .platform_utils import find_executable, is_windows, subprocess_no_window_kwargs
+from .rules_55e import get_weapon_mastery
 
 _SAVE_CHECKBOXES = {
     "strength": "Check Box 11",
@@ -80,7 +84,8 @@ def validate_character_for_pdf(
         missing.append("Character Name")
     if not state.race_id or repo.get(state.race_id) is None:
         missing.append("Species" if state.ruleset == "5.5e" else "Race")
-    if not state.class_id or repo.get(state.class_id) is None:
+    norm_classes = state.normalized_classes()
+    if not norm_classes or any(repo.get(cl.class_id) is None for cl in norm_classes):
         missing.append("Class")
     if not state.background_id or repo.get(state.background_id) is None:
         missing.append("Background")
@@ -130,20 +135,93 @@ def _fmt_mod(val: int) -> str:
     return f"+{val}" if val >= 0 else str(val)
 
 
+def _fill_pdf_form_pypdf(
+    template_pdf: Path,
+    text_fields: dict[str, str],
+    checkbox_fields: set[str],
+    output_path: Path,
+) -> None:
+    """Pure-Python AcroForm fallback using pypdf when qpdf is not installed (e.g. Windows)."""
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import BooleanObject, NameObject
+
+    reader = PdfReader(str(template_pdf))
+    writer = PdfWriter(clone_from=reader)
+    text_lookup = {k: v for k, v in text_fields.items()}
+    text_stripped = {k.strip(): v for k, v in text_fields.items()}
+
+    if "/AcroForm" in writer._root_object:
+        acro = writer._root_object["/AcroForm"].get_object()
+        acro[NameObject("/NeedAppearances")] = BooleanObject(True)
+
+    for page in writer.pages:
+        annots = page.get("/Annots")
+        if not annots:
+            continue
+        for annot_ref in annots:
+            annot = annot_ref.get_object()
+            fname = str(annot.get("/T") or "")
+            if not fname:
+                parent = annot.get("/Parent")
+                if parent is not None:
+                    fname = str(parent.get_object().get("/T") or "")
+            if not fname:
+                continue
+            if fname in text_lookup or fname.strip() in text_stripped:
+                from pypdf.generic import TextStringObject
+
+                txt = text_lookup.get(fname, text_stripped.get(fname.strip(), ""))
+                annot[NameObject("/V")] = TextStringObject(txt)
+                if "/AP" in annot:
+                    del annot["/AP"]
+            elif fname in checkbox_fields:
+                on_state = "/Yes"
+                ap = annot.get("/AP")
+                if ap and "/N" in ap:
+                    keys = [str(k) for k in ap["/N"].keys() if str(k) != "/Off"]
+                    if keys:
+                        on_state = keys[0]
+                annot[NameObject("/V")] = NameObject(on_state)
+                annot[NameObject("/AS")] = NameObject(on_state)
+
+    with output_path.open("wb") as fh:
+        writer.write(fh)
+
+
+def _overlay_pdf_pypdf(base_pdf: Path, overlay_pdf: Path, output_path: Path) -> None:
+    """Pure-Python PDF overlay fallback using pypdf when qpdf is not installed."""
+    from pypdf import PdfReader, PdfWriter
+
+    base_reader = PdfReader(str(base_pdf))
+    over_reader = PdfReader(str(overlay_pdf))
+    writer = PdfWriter()
+    for idx, base_page in enumerate(base_reader.pages):
+        if idx < len(over_reader.pages):
+            base_page.merge_page(over_reader.pages[idx])
+        writer.add_page(base_page)
+    with output_path.open("wb") as fh:
+        writer.write(fh)
+
+
 def fill_pdf_form_qpdf(
     template_pdf: Path,
     text_fields: dict[str, str],
     checkbox_fields: set[str],
     output_path: Path,
 ) -> None:
-    """Populate AcroForm fields in a fillable PDF using qpdf JSON round-trip."""
+    """Populate AcroForm fields in a fillable PDF using qpdf JSON round-trip (or pypdf fallback)."""
     template_pdf = Path(template_pdf)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    qpdf_exe = find_executable("qpdf")
+    if not qpdf_exe:
+        _fill_pdf_form_pypdf(template_pdf, text_fields, checkbox_fields, output_path)
+        return
+
     probe = subprocess.run(
         [
-            "qpdf",
+            qpdf_exe,
             "--json",
             "--json-stream-data=inline",
             "--json-key=acroform",
@@ -153,6 +231,7 @@ def fill_pdf_form_qpdf(
         capture_output=True,
         text=True,
         check=False,
+        **subprocess_no_window_kwargs(),
     )
     if probe.returncode not in (0, 3):
         raise RuntimeError(f"qpdf --json failed: {probe.stderr.strip()}")
@@ -213,10 +292,11 @@ def fill_pdf_form_qpdf(
         json_path = Path(tmpdir) / "filled.json"
         json_path.write_text(json.dumps({"qpdf": data["qpdf"]}), encoding="utf-8")
         res = subprocess.run(
-            ["qpdf", "--json-input", str(json_path), str(output_path)],
+            [qpdf_exe, "--json-input", str(json_path), str(output_path)],
             capture_output=True,
             text=True,
             check=False,
+            **subprocess_no_window_kwargs(),
         )
         if res.returncode not in (0, 3) or not output_path.is_file():
             raise RuntimeError(f"qpdf --json-input failed: {res.stderr.strip()}")
@@ -225,55 +305,99 @@ def fill_pdf_form_qpdf(
 def _extract_5e_spell_slots(template_pdf: Path) -> dict[int, list[tuple[str, Optional[str]]]]:
     """Read Page 3 of the 5e AcroForm PDF in exact visual top-to-bottom order per spell level (0..9),
     pairing each spell text field with its prepared-dot checkbox."""
-    try:
-        proc = subprocess.run(
-            ["qpdf", "--json", "--json-key=acroform", "--json-key=pages", "--json-key=qpdf", str(template_pdf)],
-            capture_output=True,
-            text=True,
-            timeout=6,
-            check=False,
-        )
-        if proc.returncode not in (0, 3):
-            raise RuntimeError(proc.stderr)
-        data = json.loads(proc.stdout)
-        objs = data["qpdf"][1]
-        page_map = {pg["object"]: idx + 1 for idx, pg in enumerate(data.get("pages", []))}
-        p3_spells: list[tuple[float, float, str]] = []
-        p3_checks: list[tuple[float, float, str]] = []
-        for f in data.get("acroform", {}).get("fields", []):
-            fn = f.get("fullname", "")
-            v = objs.get(f"obj:{f.get('object', '')}", {}).get("value", {})
-            rect = v.get("/Rect")
-            if not rect or page_map.get(v.get("/P", ""), 0) != 3:
-                continue
-            qx, qy = float(rect[0]), 792.0 - float(rect[3])
-            if fn.startswith("Spells "):
-                p3_spells.append((qx, qy, fn))
-            elif fn.startswith("Check Box"):
-                p3_checks.append((qx, qy, fn))
+    qpdf_exe = find_executable("qpdf")
+    if qpdf_exe:
+        try:
+            proc = subprocess.run(
+                [qpdf_exe, "--json", "--json-key=acroform", "--json-key=pages", "--json-key=qpdf", str(template_pdf)],
+                capture_output=True,
+                text=True,
+                timeout=6,
+                check=False,
+                **subprocess_no_window_kwargs(),
+            )
+            if proc.returncode not in (0, 3):
+                raise RuntimeError(proc.stderr)
+            data = json.loads(proc.stdout)
+            objs = data["qpdf"][1]
+            page_map = {pg["object"]: idx + 1 for idx, pg in enumerate(data.get("pages", []))}
+            p3_spells: list[tuple[float, float, str]] = []
+            p3_checks: list[tuple[float, float, str]] = []
+            for f in data.get("acroform", {}).get("fields", []):
+                fn = f.get("fullname", "")
+                v = objs.get(f"obj:{f.get('object', '')}", {}).get("value", {})
+                rect = v.get("/Rect")
+                if not rect or page_map.get(v.get("/P", ""), 0) != 3:
+                    continue
+                qx, qy = float(rect[0]), 792.0 - float(rect[3])
+                if fn.startswith("Spells "):
+                    p3_spells.append((qx, qy, fn))
+                elif fn.startswith("Check Box"):
+                    p3_checks.append((qx, qy, fn))
 
-        lvl = 0
-        mapping: dict[int, list[tuple[str, Optional[str]]]] = {}
-        for lo, hi in ((0.0, 200.0), (200.0, 400.0), (400.0, 620.0)):
-            col_sp = sorted([s for s in p3_spells if lo <= s[0] < hi], key=lambda s: s[1])
-            col_ck = sorted([c for c in p3_checks if lo <= c[0] < hi], key=lambda c: c[1])
-            blocks: list[list[tuple[float, float, str]]] = []
-            for s in col_sp:
-                if not blocks or (s[1] - blocks[-1][-1][1]) > 25.0:
-                    blocks.append([s])
-                else:
-                    blocks[-1].append(s)
-            for b in blocks:
-                pairs: list[tuple[str, Optional[str]]] = []
-                for s in b:
-                    near = [c[2] for c in col_ck if abs(c[1] - s[1]) < 6.0]
-                    pairs.append((s[2], near[0] if near else None))
-                mapping[lvl] = pairs
-                lvl += 1
-        if len(mapping) >= 10:
-            return mapping
-    except Exception:
-        pass
+            lvl = 0
+            mapping: dict[int, list[tuple[str, Optional[str]]]] = {}
+            for lo, hi in ((0.0, 200.0), (200.0, 400.0), (400.0, 620.0)):
+                col_sp = sorted([s for s in p3_spells if lo <= s[0] < hi], key=lambda s: s[1])
+                col_ck = sorted([c for c in p3_checks if lo <= c[0] < hi], key=lambda c: c[1])
+                blocks: list[list[tuple[float, float, str]]] = []
+                for s in col_sp:
+                    if not blocks or (s[1] - blocks[-1][-1][1]) > 25.0:
+                        blocks.append([s])
+                    else:
+                        blocks[-1].append(s)
+                for b in blocks:
+                    pairs: list[tuple[str, Optional[str]]] = []
+                    for s in b:
+                        near = [c[2] for c in col_ck if abs(c[1] - s[1]) < 6.0]
+                        pairs.append((s[2], near[0] if near else None))
+                    mapping[lvl] = pairs
+                    lvl += 1
+            if len(mapping) >= 10:
+                return mapping
+        except Exception:
+            pass
+    else:
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(str(template_pdf))
+            if len(reader.pages) >= 3:
+                p3_spells = []
+                p3_checks = []
+                for annot_ref in reader.pages[2].get("/Annots") or []:
+                    annot = annot_ref.get_object()
+                    fn = str(annot.get("/T") or "")
+                    rect = annot.get("/Rect")
+                    if not rect:
+                        continue
+                    qx, qy = float(rect[0]), 792.0 - float(rect[3])
+                    if fn.startswith("Spells "):
+                        p3_spells.append((qx, qy, fn))
+                    elif fn.startswith("Check Box"):
+                        p3_checks.append((qx, qy, fn))
+                lvl = 0
+                mapping = {}
+                for lo, hi in ((0.0, 200.0), (200.0, 400.0), (400.0, 620.0)):
+                    col_sp = sorted([s for s in p3_spells if lo <= s[0] < hi], key=lambda s: s[1])
+                    col_ck = sorted([c for c in p3_checks if lo <= c[0] < hi], key=lambda c: c[1])
+                    blocks = []
+                    for s in col_sp:
+                        if not blocks or (s[1] - blocks[-1][-1][1]) > 25.0:
+                            blocks.append([s])
+                        else:
+                            blocks[-1].append(s)
+                    for b in blocks:
+                        pairs = []
+                        for s in b:
+                            near = [c[2] for c in col_ck if abs(c[1] - s[1]) < 6.0]
+                            pairs.append((s[2], near[0] if near else None))
+                        mapping[lvl] = pairs
+                        lvl += 1
+                if len(mapping) >= 10:
+                    return mapping
+        except Exception:
+            pass
     return {lvl: [(fn, None) for fn in fields] for lvl, fields in _SPELL_FIELDS_BY_LEVEL.items()}
 
 
@@ -375,14 +499,19 @@ def _overlay_5e_appearance(
         finally:
             painter.end()
 
-        res = subprocess.run(
-            ["qpdf", str(filled_pdf), "--overlay", str(overlay_pdf), "--", str(output_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if res.returncode not in (0, 3) or not output_path.is_file():
-            raise RuntimeError(f"qpdf --overlay (5e appearance) failed: {res.stderr.strip()}")
+        qpdf_exe = find_executable("qpdf")
+        if qpdf_exe:
+            res = subprocess.run(
+                [qpdf_exe, str(filled_pdf), "--overlay", str(overlay_pdf), "--", str(output_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                **subprocess_no_window_kwargs(),
+            )
+            if res.returncode not in (0, 3) or not output_path.is_file():
+                raise RuntimeError(f"qpdf --overlay (5e appearance) failed: {res.stderr.strip()}")
+        else:
+            _overlay_pdf_pypdf(filled_pdf, overlay_pdf, output_path)
 
 
 def _build_5e_field_map(
@@ -392,14 +521,16 @@ def _build_5e_field_map(
     template_pdf: Optional[Path] = None,
 ) -> tuple[dict[str, str], set[str]]:
     race_el = repo.get(state.race_id)
-    class_el = repo.get(state.class_id)
     bg_el = repo.get(state.background_id)
     align_el = repo.get(state.alignment_id)
+
+    class_level_str = class_display_summary(state, repo)
+    hd_total_str = computed.hit_dice_summary or f"{state.level}{computed.hit_die}"
 
     text: dict[str, str] = {
         "CharacterName": state.name or "New Adventurer",
         "CharacterName 2": state.name or "New Adventurer",
-        "ClassLevel": f"{class_el.name if class_el else ''} {state.level}".strip(),
+        "ClassLevel": class_level_str,
         "Background": bg_el.name if bg_el else "",
         "PlayerName": state.player_name,
         "Race ": race_el.name if race_el else "",
@@ -411,7 +542,7 @@ def _build_5e_field_map(
         "Speed": f"{computed.speed} ft",
         "HPMax": str(computed.max_hp),
         "HPCurrent": str(computed.max_hp),
-        "HDTotal": f"{state.level}{computed.hit_die}",
+        "HDTotal": hd_total_str,
         "HD": computed.hit_die,
         "Passive": str(computed.passive_perception),
         "CP": str(state.currency.get("cp", 0)),
@@ -514,12 +645,22 @@ def _build_5e_field_map(
     # Spellcasting (Page 3)
     if computed.spellcasting:
         sc = computed.spellcasting
-        text["Spellcasting Class 2"] = sc.caster_name
-        text["SpellcastingAbility 2"] = sc.ability
-        text["SpellSaveDC  2"] = str(sc.save_dc)
-        text["SpellAtkBonus 2"] = _fmt_mod(sc.attack_bonus)
+        if len(sc.casters) > 1:
+            text["Spellcasting Class 2"] = sc.caster_name
+            text["SpellcastingAbility 2"] = " / ".join(ABILITY_ABBR.get(c.ability.lower(), c.ability[:3].upper()) for c in sc.casters)
+            text["SpellSaveDC  2"] = " / ".join(str(c.save_dc) for c in sc.casters)
+            text["SpellAtkBonus 2"] = " / ".join(_fmt_mod(c.attack_bonus) for c in sc.casters)
+        else:
+            text["Spellcasting Class 2"] = sc.caster_name
+            text["SpellcastingAbility 2"] = sc.ability
+            text["SpellSaveDC  2"] = str(sc.save_dc)
+            text["SpellAtkBonus 2"] = _fmt_mod(sc.attack_bonus)
+        merged_slots = dict(sc.slots)
+        for slvl, cnt in sc.pact_slots.items():
+            if slvl not in merged_slots:
+                merged_slots[slvl] = cnt
         for lvl in range(1, 10):
-            cnt = sc.slots.get(lvl, 0)
+            cnt = merged_slots.get(lvl, 0)
             if cnt:
                 text[f"SlotsTotal {18 + lvl}"] = str(cnt)
 
@@ -528,7 +669,7 @@ def _build_5e_field_map(
             if template_pdf is not None and template_pdf.is_file()
             else {lvl: [(fn, None) for fn in fields] for lvl, fields in _SPELL_FIELDS_BY_LEVEL.items()}
         )
-        prepared_set = set(state.prepared_spells)
+        prepared_set = set(state.prepared_spells) | set(sc.always_prepared_spell_ids)
         grouped: dict[int, list[tuple[str, bool]]] = {lvl: [] for lvl in range(10)}
         for sid in _all_character_spells(state, computed):
             sel = repo.get(sid)
@@ -560,7 +701,7 @@ def _draw_text(
     align: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
     wrap: bool = False,
 ) -> None:
-    font = QFont("Sans Serif", int(size))
+    font = QFont("Arial" if is_windows() else "Sans Serif", int(size))
     font.setPointSizeF(size)
     font.setBold(bold)
     painter.setFont(font)
@@ -572,29 +713,45 @@ def _draw_text(
 
 
 def _get_pdf_page_size(pdf_path: Path) -> tuple[float, float]:
-    """Read page 1 MediaBox width/height in points via qpdf, defaulting to US Letter (612x792)."""
-    try:
-        proc = subprocess.run(
-            ["qpdf", "--json", "--json-key=pages", "--json-key=qpdf", str(pdf_path)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if proc.returncode in (0, 3):
-            data = json.loads(proc.stdout)
-            pages = data.get("pages", [])
-            objs = data.get("qpdf", [None, {}])[1]
-            if pages:
-                page_obj = objs.get(f"obj:{pages[0].get('object', '')}", {}).get("value", {})
-                mbox = page_obj.get("/CropBox") or page_obj.get("/MediaBox")
-                if isinstance(mbox, list) and len(mbox) == 4:
-                    w = float(mbox[2]) - float(mbox[0])
-                    h = float(mbox[3]) - float(mbox[1])
-                    if w > 100 and h > 100:
-                        return w, h
-    except Exception:
-        pass
+    """Read page 1 MediaBox width/height in points via qpdf or pypdf, defaulting to US Letter (612x792)."""
+    qpdf_exe = find_executable("qpdf")
+    if qpdf_exe:
+        try:
+            proc = subprocess.run(
+                [qpdf_exe, "--json", "--json-key=pages", "--json-key=qpdf", str(pdf_path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                **subprocess_no_window_kwargs(),
+            )
+            if proc.returncode in (0, 3):
+                data = json.loads(proc.stdout)
+                pages = data.get("pages", [])
+                objs = data.get("qpdf", [None, {}])[1]
+                if pages:
+                    page_obj = objs.get(f"obj:{pages[0].get('object', '')}", {}).get("value", {})
+                    mbox = page_obj.get("/CropBox") or page_obj.get("/MediaBox")
+                    if isinstance(mbox, list) and len(mbox) == 4:
+                        w = float(mbox[2]) - float(mbox[0])
+                        h = float(mbox[3]) - float(mbox[1])
+                        if w > 100 and h > 100:
+                            return w, h
+        except Exception:
+            pass
+    else:
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(str(pdf_path))
+            if reader.pages:
+                box = reader.pages[0].cropbox or reader.pages[0].mediabox
+                w = float(box.width)
+                h = float(box.height)
+                if w > 100 and h > 100:
+                    return w, h
+        except Exception:
+            pass
     return 612.0, 792.0
 
 
@@ -634,10 +791,16 @@ def export_55e_overlay_pdf(
             # --- PAGE 1 (612 x 792 pt official 2024 sheet coordinates) ---
             _draw_text(painter, 26.6, 15.0, 221.5, 14.9, state.name or "", size=10.5, bold=True)
             _draw_text(painter, 25.5, 39.0, 120.0, 13.5, bg_el.name if bg_el else "", size=8.5)
-            _draw_text(painter, 150.6, 39.0, 98.2, 13.5, class_el.name if class_el else "", size=8.5)
+            norm_classes = state.normalized_classes()
+            cls_55e_txt = (
+                class_display_summary(state, repo)
+                if len(norm_classes) > 1
+                else (class_el.name if class_el else "")
+            )
+            _draw_text(painter, 150.6, 39.0, 98.2, 13.5, cls_55e_txt, size=8.5 if len(cls_55e_txt) < 18 else 7.2)
             _draw_text(painter, 25.0, 60.5, 120.2, 14.1, race_el.name if race_el else "", size=8.5)
             archetypes = [e.name for e in computed.granted_elements if e.type == "Archetype"]
-            _draw_text(painter, 150.6, 60.5, 98.7, 14.1, archetypes[0] if archetypes else "", size=8.5)
+            _draw_text(painter, 150.6, 60.5, 98.7, 14.1, ", ".join(archetypes), size=8.5)
 
             # Level, XP, AC, HP Current, HP Max, Hit Dice Max
             _draw_text(
@@ -661,8 +824,9 @@ def export_55e_overlay_pdf(
                 painter, 444.9, 59.5, 43.3, 13.9, str(computed.max_hp), size=8.5, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
+            hd_55e_txt = computed.hit_dice_summary or f"{state.level}{computed.hit_die}"
             _draw_text(
-                painter, 499.8, 59.5, 37.8, 14.1, f"{state.level}{computed.hit_die}", size=8.5, bold=True,
+                painter, 499.8, 59.5, 37.8, 14.1, hd_55e_txt, size=8.5 if len(hd_55e_txt) <= 6 else 7.0, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
 
@@ -829,6 +993,7 @@ def export_55e_overlay_pdf(
 
             # Weapons & Damage Cantrips (6 rows)
             weapons = [it for it in state.inventory if it.category == "Weapon"][:6]
+            mastered_set = {w.strip().lower() for w in state.weapon_masteries}
             str_mod = computed.ability_modifiers["strength"]
             dex_mod = computed.ability_modifiers["dexterity"]
             for idx, wpn in enumerate(weapons):
@@ -840,7 +1005,9 @@ def export_55e_overlay_pdf(
                     or "finesse" in " ".join(el.supports).lower()
                 )
                 atk_mod = max(str_mod, dex_mod) if is_ranged else str_mod
-                _draw_text(painter, 231.5, wy, 105.6, 16.8, wpn.name, size=8.0)
+                m_prop = get_weapon_mastery(wpn.name) if wpn.name.lower() in mastered_set else None
+                wpn_label = f"{wpn.name} [{m_prop}]" if m_prop else wpn.name
+                _draw_text(painter, 231.5, wy, 105.6, 16.8, wpn_label, size=7.8 if m_prop else 8.0)
                 _draw_text(
                     painter, 341.5, wy, 43.8, 16.8,
                     _fmt_mod(atk_mod + computed.proficiency_bonus + wpn.magic_bonus),
@@ -849,10 +1016,20 @@ def export_55e_overlay_pdf(
                 dmg_txt = f"{dmg} +{wpn.magic_bonus}" if (dmg and wpn.magic_bonus > 0) else dmg
                 _draw_text(painter, 390.0, wy, 74.6, 16.8, dmg_txt, size=7.8)
 
-            # Class Features (2 columns), Species Traits, Feats
+            # Class Features (2 columns), Species Traits, Feats (plus 5.5e notes & animal forms)
             cls_feat_list = [
                 f"• {e.name}" for e in computed.granted_elements if e.type in ("Class Feature", "Archetype Feature")
             ]
+            if state.heroic_inspiration:
+                cls_feat_list.append("• Heroic Inspiration: Active")
+            if state.exhaustion_level > 0:
+                cls_feat_list.append(f"• Exhaustion Lv {state.exhaustion_level} ({computed.exhaustion_d20_penalty} d20)")
+            if state.animal_forms:
+                af_names = [
+                    (find_animal_form(fid, state).name if find_animal_form(fid, state) else fid)
+                    for fid in state.animal_forms[:6]
+                ]
+                cls_feat_list.append(f"• Wild Shape Forms: {', '.join(af_names)}")
             split_idx = max(14, (len(cls_feat_list) + 1) // 2) if len(cls_feat_list) > 14 else len(cls_feat_list)
             cls_col1 = "\n".join(cls_feat_list[:split_idx])
             cls_col2 = "\n".join(cls_feat_list[split_idx:])
@@ -875,17 +1052,33 @@ def export_55e_overlay_pdf(
 
             if computed.spellcasting:
                 sc = computed.spellcasting
-                _draw_text(painter, 24.9, 15.0, 110.2, 18.0, sc.ability, size=9.5, bold=True, align=Qt.AlignmentFlag.AlignCenter)
-                _draw_text(painter, 14.0, 49.7, 33.7, 26.5, _fmt_mod(sc.ability_mod), size=11, bold=True, align=Qt.AlignmentFlag.AlignCenter)
-                _draw_text(painter, 13.2, 78.6, 34.6, 25.7, str(sc.save_dc), size=11, bold=True, align=Qt.AlignmentFlag.AlignCenter)
-                _draw_text(painter, 13.3, 107.2, 34.3, 25.3, _fmt_mod(sc.attack_bonus), size=11, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                if len(sc.casters) > 1:
+                    ab_hdr = " / ".join(ABILITY_ABBR.get(c.ability.lower(), c.ability[:3].upper()) for c in sc.casters)
+                    mod_hdr = "/".join(_fmt_mod(c.ability_mod) for c in sc.casters)
+                    dc_hdr = "/".join(str(c.save_dc) for c in sc.casters)
+                    atk_hdr = "/".join(_fmt_mod(c.attack_bonus) for c in sc.casters)
+                else:
+                    ab_hdr, mod_hdr, dc_hdr, atk_hdr = (
+                        sc.ability,
+                        _fmt_mod(sc.ability_mod),
+                        str(sc.save_dc),
+                        _fmt_mod(sc.attack_bonus),
+                    )
+                _draw_text(painter, 24.9, 15.0, 110.2, 18.0, ab_hdr, size=9.5 if len(ab_hdr) <= 14 else 7.8, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                _draw_text(painter, 14.0, 49.7, 33.7, 26.5, mod_hdr, size=11 if len(mod_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                _draw_text(painter, 13.2, 78.6, 34.6, 25.7, dc_hdr, size=11 if len(dc_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                _draw_text(painter, 13.3, 107.2, 34.3, 25.3, atk_hdr, size=11 if len(atk_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
 
                 slot_coords = {
                     1: (184.3, 87.3), 2: (184.3, 101.7), 3: (184.3, 115.9),
                     4: (273.8, 87.5), 5: (273.8, 101.8), 6: (273.8, 115.9),
                     7: (353.5, 87.4), 8: (353.5, 101.7), 9: (353.5, 115.8),
                 }
-                for lvl, cnt in sc.slots.items():
+                merged_slots = dict(sc.slots)
+                for slvl, cnt in sc.pact_slots.items():
+                    if slvl not in merged_slots:
+                        merged_slots[slvl] = cnt
+                for lvl, cnt in merged_slots.items():
                     if lvl in slot_coords:
                         sx, sy = slot_coords[lvl]
                         _draw_text(painter, sx, sy, 15.1, 10.4, str(cnt), size=8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
@@ -973,14 +1166,19 @@ def export_55e_overlay_pdf(
         finally:
             painter.end()
 
-        res = subprocess.run(
-            ["qpdf", str(template_pdf), "--overlay", str(overlay_pdf), "--", str(output_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if res.returncode not in (0, 3) or not output_path.is_file():
-            raise RuntimeError(f"qpdf --overlay failed: {res.stderr.strip()}")
+        qpdf_exe = find_executable("qpdf")
+        if qpdf_exe:
+            res = subprocess.run(
+                [qpdf_exe, str(template_pdf), "--overlay", str(overlay_pdf), "--", str(output_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                **subprocess_no_window_kwargs(),
+            )
+            if res.returncode not in (0, 3) or not output_path.is_file():
+                raise RuntimeError(f"qpdf --overlay failed: {res.stderr.strip()}")
+        else:
+            _overlay_pdf_pypdf(template_pdf, overlay_pdf, output_path)
 
 
 def build_sheet_html(
@@ -988,16 +1186,16 @@ def build_sheet_html(
     computed: ComputedCharacter,
     repo: ContentRepository,
 ) -> str:
-    """Fallback HTML character sheet if official PDF templates are unavailable."""
+    """Fallback HTML character sheet if official PDF templates or qpdf/pypdf are unavailable."""
     race_el = repo.get(state.race_id)
-    class_el = repo.get(state.class_id)
     bg_el = repo.get(state.background_id)
     align_el = repo.get(state.alignment_id)
 
+    cls_summary = class_display_summary(state, repo) or "No Class"
     subtitle_parts = [
         f"Level {state.level}",
         race_el.name if race_el else "No Race",
-        class_el.name if class_el else "No Class",
+        cls_summary,
     ]
     if bg_el:
         subtitle_parts.append(bg_el.name)
@@ -1013,6 +1211,31 @@ def build_sheet_html(
             f"</td>"
         )
 
+    ab_cells = "".join(
+        f"<td align='center' style='border:1px solid #cbd5e1; padding:4px;'>"
+        f"<b>{ABILITY_ABBR[ab]}</b><br/>{computed.ability_totals[ab]} ({_fmt_mod(computed.ability_modifiers[ab])})</td>"
+        for ab in ABILITIES
+    )
+    saves_txt = ", ".join(
+        f"{'*' if computed.saving_throws[ab].proficient else ''}{ABILITY_ABBR[ab]} {_fmt_mod(computed.saving_throws[ab].bonus)}"
+        for ab in ABILITIES
+    )
+    skills_txt = ", ".join(
+        f"{'*' if sk.proficient else ''}{name} {_fmt_mod(sk.bonus)}"
+        for name, sk in computed.skills.items()
+    )
+    feats_txt = ", ".join(
+        el.name
+        for el in computed.granted_elements
+        if el.type in ("Class Feature", "Archetype", "Archetype Feature", "Racial Trait", "Background Feature", "Feat")
+    )
+    equip_txt = ", ".join(
+        f"{it.name} x{it.quantity}" if it.quantity > 1 else it.name for it in state.inventory
+    )
+    spells_txt = ", ".join(
+        (repo.get(sid).name if repo.get(sid) else sid) for sid in _all_character_spells(state, computed)
+    )
+
     return f"""
     <html>
     <body style='font-family:sans-serif; font-size:9.5pt; color:#1c242b;'>
@@ -1027,7 +1250,13 @@ def build_sheet_html(
           </tr>
         </table>
       </div>
-      <p><b>AC:</b> {computed.armor_class} | <b>HP:</b> {computed.max_hp} | <b>Speed:</b> {computed.speed} ft | <b>Prof:</b> +{computed.proficiency_bonus}</p>
+      <p><b>AC:</b> {computed.armor_class} | <b>HP:</b> {computed.max_hp} | <b>Hit Dice:</b> {html.escape(computed.hit_dice_summary or computed.hit_die)} | <b>Speed:</b> {computed.speed} ft | <b>Prof:</b> +{computed.proficiency_bonus} | <b>Init:</b> {_fmt_mod(computed.initiative)}</p>
+      <table width='100%' cellspacing='4' cellpadding='2'><tr>{ab_cells}</tr></table>
+      <p><b>Saving Throws:</b> {html.escape(saves_txt)}</p>
+      <p><b>Skills:</b> {html.escape(skills_txt)}</p>
+      <p><b>Features &amp; Traits:</b> {html.escape(feats_txt or '-')}</p>
+      <p><b>Equipment:</b> {html.escape(equip_txt or '-')}</p>
+      <p><b>Spells:</b> {html.escape(spells_txt or '-')}</p>
       <p><b>Notes:</b> {html.escape(state.notes or '-')}</p>
     </body>
     </html>
@@ -1049,6 +1278,16 @@ def _resolve_template_pdf(filename: str, templates_dir: Optional[Path] = None) -
     return None
 
 
+def _can_use_pdf_tools() -> bool:
+    if find_executable("qpdf"):
+        return True
+    try:
+        import pypdf  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def export_character_pdf(
     state: CharacterState,
     computed: ComputedCharacter,
@@ -1059,47 +1298,51 @@ def export_character_pdf(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if state.ruleset == "5.5e":
-        tpl = _resolve_template_pdf("dnd55e_sheet.pdf", templates_dir)
-        if tpl is not None:
-            export_55e_overlay_pdf(state, computed, repo, tpl, output_path)
-            return
-    else:
-        tpl = _resolve_template_pdf("dnd5e_sheet.pdf", templates_dir)
-        if tpl is not None:
-            text_fields, checked = _build_5e_field_map(state, computed, repo, template_pdf=tpl)
-            # Collect exact Page 3 prepared checkbox rects for crisp dot rendering
-            prep_rects: list[tuple[float, float, float, float]] = []
-            try:
-                probe = subprocess.run(
-                    ["qpdf", "--json", "--json-key=acroform", "--json-key=pages", "--json-key=qpdf", str(tpl)],
-                    capture_output=True, text=True, timeout=6, check=False,
-                )
-                if probe.returncode in (0, 3):
-                    pdata = json.loads(probe.stdout)
-                    pobjs = pdata["qpdf"][1]
-                    pmap = {pg["object"]: idx + 1 for idx, pg in enumerate(pdata.get("pages", []))}
-                    for f in pdata.get("acroform", {}).get("fields", []):
-                        fn = f.get("fullname", "")
-                        if fn in checked:
-                            v = pobjs.get(f"obj:{f.get('object', '')}", {}).get("value", {})
-                            rect = v.get("/Rect")
-                            if rect and pmap.get(v.get("/P", ""), 0) == 3:
-                                prep_rects.append((
-                                    float(rect[0]),
-                                    792.0 - float(rect[3]),
-                                    float(rect[2]) - float(rect[0]),
-                                    float(rect[3]) - float(rect[1]),
-                                ))
-            except Exception:
-                pass
-            with tempfile.TemporaryDirectory(prefix="aurora_5e_fill_") as tmpdir:
-                filled_tmp = Path(tmpdir) / "filled.pdf"
-                fill_pdf_form_qpdf(tpl, text_fields, checked, filled_tmp)
-                _overlay_5e_appearance(filled_tmp, state, output_path, prepared_dot_rects=prep_rects)
-            return
+    if _can_use_pdf_tools():
+        if state.ruleset == "5.5e":
+            tpl = _resolve_template_pdf("dnd55e_sheet.pdf", templates_dir)
+            if tpl is not None:
+                export_55e_overlay_pdf(state, computed, repo, tpl, output_path)
+                return
+        else:
+            tpl = _resolve_template_pdf("dnd5e_sheet.pdf", templates_dir)
+            if tpl is not None:
+                text_fields, checked = _build_5e_field_map(state, computed, repo, template_pdf=tpl)
+                # Collect exact Page 3 prepared checkbox rects for crisp dot rendering
+                prep_rects: list[tuple[float, float, float, float]] = []
+                qpdf_exe = find_executable("qpdf")
+                if qpdf_exe:
+                    try:
+                        probe = subprocess.run(
+                            [qpdf_exe, "--json", "--json-key=acroform", "--json-key=pages", "--json-key=qpdf", str(tpl)],
+                            capture_output=True, text=True, timeout=6, check=False,
+                            **subprocess_no_window_kwargs(),
+                        )
+                        if probe.returncode in (0, 3):
+                            pdata = json.loads(probe.stdout)
+                            pobjs = pdata["qpdf"][1]
+                            pmap = {pg["object"]: idx + 1 for idx, pg in enumerate(pdata.get("pages", []))}
+                            for f in pdata.get("acroform", {}).get("fields", []):
+                                fn = f.get("fullname", "")
+                                if fn in checked:
+                                    v = pobjs.get(f"obj:{f.get('object', '')}", {}).get("value", {})
+                                    rect = v.get("/Rect")
+                                    if rect and pmap.get(v.get("/P", ""), 0) == 3:
+                                        prep_rects.append((
+                                            float(rect[0]),
+                                            792.0 - float(rect[3]),
+                                            float(rect[2]) - float(rect[0]),
+                                            float(rect[3]) - float(rect[1]),
+                                        ))
+                    except Exception:
+                        pass
+                with tempfile.TemporaryDirectory(prefix="aurora_5e_fill_") as tmpdir:
+                    filled_tmp = Path(tmpdir) / "filled.pdf"
+                    fill_pdf_form_qpdf(tpl, text_fields, checked, filled_tmp)
+                    _overlay_5e_appearance(filled_tmp, state, output_path, prepared_dot_rects=prep_rects)
+                return
 
-    # Fallback HTML export if template PDF is not installed
+    # Fallback HTML export if template PDF or qpdf/pypdf is not installed
     writer = QPdfWriter(str(output_path))
     writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
     writer.setPageMargins(QMarginsF(12, 12, 12, 12), QPageLayout.Unit.Millimeter)

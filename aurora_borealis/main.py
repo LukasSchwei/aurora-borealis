@@ -17,6 +17,7 @@ from .fivetools_importer import import_5etools_directory, import_5etools_from_gi
 from .github_importer import install_official_aurora_content
 from .loader import ContentRepository
 from .paths import get_config_path, get_custom_dir, get_elements_dir, get_templates_dir
+from .platform_utils import configure_windows_app_id
 from .ui.main_window import MainWindow
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -38,8 +39,9 @@ def ensure_elements_extracted(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    configure_windows_app_id()
     parser = argparse.ArgumentParser(
-        description="Aurora Borealis — Native Linux D&D 5e / 5.5e Character Builder"
+        description="Aurora Borealis — Cross-Platform (Linux & Windows) D&D 5e / 5.5e Character Builder"
     )
     parser.add_argument(
         "--extract-msi",

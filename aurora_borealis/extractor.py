@@ -12,6 +12,8 @@ from typing import Optional
 
 from lxml import etree
 
+from .platform_utils import find_executable, is_windows, subprocess_no_window_kwargs
+
 XML_START_RE = re.compile(rb"<\?xml[^>]*\?>\s*<elements\b")
 PDF_START_RE = re.compile(rb"%PDF-1\.[0-7]")
 
@@ -23,19 +25,44 @@ def _slugify(value: str) -> str:
 
 def _extract_exe_bytes(msi_path: Path) -> bytes:
     with tempfile.TemporaryDirectory(prefix="aurora_extract_") as tmpdir:
-        proc = subprocess.run(
-            ["7z", "x", "-y", f"-o{tmpdir}", str(msi_path), "Aurora_Builder.exe"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        exe_path = Path(tmpdir) / "Aurora_Builder.exe"
-        if proc.returncode != 0 or not exe_path.is_file():
-            raise RuntimeError(
-                f"Failed to extract Aurora_Builder.exe from {msi_path}: "
-                f"{proc.stderr.strip() or proc.stdout.strip()}"
+        seven_z = find_executable("7z")
+        if seven_z:
+            proc = subprocess.run(
+                [seven_z, "x", "-y", f"-o{tmpdir}", str(msi_path), "Aurora_Builder.exe"],
+                capture_output=True,
+                text=True,
+                check=False,
+                **subprocess_no_window_kwargs(),
             )
-        return exe_path.read_bytes()
+            exe_path = Path(tmpdir) / "Aurora_Builder.exe"
+            if proc.returncode == 0 and exe_path.is_file():
+                return exe_path.read_bytes()
+            if not is_windows():
+                raise RuntimeError(
+                    f"Failed to extract Aurora_Builder.exe from {msi_path}: "
+                    f"{proc.stderr.strip() or proc.stdout.strip()}"
+                )
+
+        if is_windows():
+            proc = subprocess.run(
+                ["msiexec", "/a", str(msi_path), "/qn", f"TARGETDIR={tmpdir}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                **subprocess_no_window_kwargs(),
+            )
+            if proc.returncode == 0:
+                for found in Path(tmpdir).rglob("Aurora_Builder.exe"):
+                    if found.is_file():
+                        return found.read_bytes()
+            raise RuntimeError(
+                f"Failed to extract Aurora_Builder.exe from {msi_path}. "
+                "Install 7-Zip (7z.exe) or ensure msiexec administrative extraction succeeds."
+            )
+
+        raise RuntimeError(
+            f"Failed to extract Aurora_Builder.exe from {msi_path}: 7z executable not found."
+        )
 
 
 def _extract_xml_from_bytes(data: bytes, output_dir: Path) -> int:
@@ -85,6 +112,7 @@ def _extract_official_5e_pdf_from_bytes(data: bytes, templates_dir: Path) -> int
     templates_dir.mkdir(parents=True, exist_ok=True)
     starts = [m.start() for m in PDF_START_RE.finditer(data)]
     saved = 0
+    qpdf_exe = find_executable("qpdf")
     with tempfile.TemporaryDirectory(prefix="aurora_pdf_") as tmpdir:
         for idx, start in enumerate(starts):
             nxt = starts[idx + 1] if idx + 1 < len(starts) else len(data)
@@ -97,25 +125,44 @@ def _extract_official_5e_pdf_from_bytes(data: bytes, templates_dir: Path) -> int
                 continue
             probe_path = Path(tmpdir) / f"probe_{idx}.pdf"
             probe_path.write_bytes(chunk)
-            proc = subprocess.run(
-                ["qpdf", "--json", "--json-key=acroform", "--json-key=pages", str(probe_path)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if proc.returncode != 0:
-                continue
-            try:
-                info = json.loads(proc.stdout)
-            except Exception:
-                continue
-            pages = info.get("pages", [])
-            fields = info.get("acroform", {}).get("fields", [])
-            names = {f.get("fullname", "") for f in fields}
-            if len(pages) == 3 and "ClassLevel" in names and "CharacterName" in names:
-                (templates_dir / "dnd5e_sheet.pdf").write_bytes(chunk)
-                saved = 1
-                break
+
+            if qpdf_exe:
+                proc = subprocess.run(
+                    [qpdf_exe, "--json", "--json-key=acroform", "--json-key=pages", str(probe_path)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    **subprocess_no_window_kwargs(),
+                )
+                if proc.returncode != 0:
+                    continue
+                try:
+                    info = json.loads(proc.stdout)
+                except Exception:
+                    continue
+                pages = info.get("pages", [])
+                fields = info.get("acroform", {}).get("fields", [])
+                names = {f.get("fullname", "") for f in fields}
+                if len(pages) == 3 and "ClassLevel" in names and "CharacterName" in names:
+                    (templates_dir / "dnd5e_sheet.pdf").write_bytes(chunk)
+                    saved = 1
+                    break
+            else:
+                matched = False
+                try:
+                    from pypdf import PdfReader
+
+                    reader = PdfReader(str(probe_path))
+                    fields = reader.get_fields() or {}
+                    if len(reader.pages) == 3 and "ClassLevel" in fields and "CharacterName" in fields:
+                        matched = True
+                except Exception:
+                    if b"ClassLevel" in chunk and b"CharacterName" in chunk:
+                        matched = True
+                if matched:
+                    (templates_dir / "dnd5e_sheet.pdf").write_bytes(chunk)
+                    saved = 1
+                    break
     return saved
 
 

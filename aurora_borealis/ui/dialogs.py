@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -10,17 +11,22 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QSpinBox,
@@ -29,10 +35,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..animal_forms import (
+    AnimalForm,
+    parse_cr_label,
+)
 from ..engine import parse_weight_lb
+from ..models import ABILITIES, ABILITY_ABBR, CharacterState, Element
 from ..loader import ContentRepository
 from ..models import DuplicateEntry, Element, InventoryItem
 from ..persistence import encode_portrait_file
+
+
+_PORTRAIT_PIXMAP_CACHE: dict[tuple[str, str, int], QPixmap] = {}
 
 
 def pixmap_from_portrait(
@@ -40,7 +54,17 @@ def pixmap_from_portrait(
     portrait_path: str = "",
     size: int = 64,
 ) -> Optional[QPixmap]:
-    """Build a scaled QPixmap from base64 portrait data or fallback file path."""
+    """Build a scaled QPixmap from base64 portrait data or fallback file path (cached)."""
+    b64_key = (
+        hashlib.sha1(portrait_base64.encode("ascii", errors="ignore")).hexdigest()
+        if portrait_base64
+        else ""
+    )
+    cache_key = (b64_key, portrait_path or "", size)
+    cached = _PORTRAIT_PIXMAP_CACHE.get(cache_key)
+    if cached is not None and not cached.isNull():
+        return cached
+
     pix = QPixmap()
     if portrait_base64:
         try:
@@ -52,12 +76,16 @@ def pixmap_from_portrait(
         pix.load(portrait_path)
     if pix.isNull():
         return None
-    return pix.scaled(
+    scaled = pix.scaled(
         size,
         size,
         Qt.AspectRatioMode.KeepAspectRatioByExpanding,
         Qt.TransformationMode.SmoothTransformation,
     )
+    if len(_PORTRAIT_PIXMAP_CACHE) >= 128:
+        _PORTRAIT_PIXMAP_CACHE.clear()
+    _PORTRAIT_PIXMAP_CACHE[cache_key] = scaled
+    return scaled
 
 
 class NewCharacterDialog(QDialog):
@@ -377,4 +405,309 @@ class MagicGearDialog(QDialog):
             category=el.type,
             magic_bonus=self.spn_bonus.value(),
             enchantment=self.cmb_template.currentText(),
+        )
+
+
+RULE_OVERRIDE_SPECS: list[tuple[str, str, str]] = [
+    (
+        "allow_extra_spells",
+        "Allow Extra / Off-List Spells",
+        "Ignore class/subclass spell lists, max spell level, and known/prepared limits.",
+    ),
+    (
+        "allow_all_animal_forms",
+        "Allow All Animal Forms / Wild Shape Forms",
+        "Ignore Druid level, CR, swim/fly speed, and known-form restrictions.",
+    ),
+    (
+        "override_multiclass_prereqs",
+        "Ignore Multiclassing Ability Prerequisites",
+        "Allow multiclassing into or out of any class regardless of ability scores.",
+    ),
+    (
+        "override_weapon_mastery",
+        "Override 5.5e Weapon Mastery Limits",
+        "Allow any class to assign any number of Weapon Masteries.",
+    ),
+    (
+        "override_55e_subclass_level",
+        "Allow Early Subclass Selection in 5.5e (Lv 1–2)",
+        "Keep legacy level 1–2 subclass choices instead of standardizing to level 3.",
+    ),
+    (
+        "override_asi_cap",
+        "Allow Ability Scores Above 20",
+        "Bypass the standard ability score cap of 20 during character customization.",
+    ),
+    (
+        "override_heavy_weapon_req",
+        "Ignore 5.5e Heavy Weapon STR/DEX 13 Requirement",
+        "Suppress warnings/restrictions when wielding Heavy weapons below 13 STR/DEX.",
+    ),
+    (
+        "override_companion_limits",
+        "Allow All Companion Templates",
+        "Attach any companion (Beast, Steel Defender, Drake, Steed, Familiar) regardless of class.",
+    ),
+]
+
+
+class RuleOverridesDialog(QDialog):
+    """Centralized manual rule overrides dialog for the active character."""
+
+    def __init__(self, state, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manual Rule Overrides")
+        self.setMinimumWidth(560)
+        self._checkboxes: dict[str, QCheckBox] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Enable manual overrides to relax D&D 5e / 5.5e restrictions for this character "
+            "(homebrew campaigns, magic items, or DM rulings)."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        grp = QGroupBox("Character Rule Overrides")
+        gl = QVBoxLayout(grp)
+        gl.setSpacing(8)
+        for key, label, desc in RULE_OVERRIDE_SPECS:
+            chk = QCheckBox(label)
+            chk.setChecked(state.has_override(key))
+            chk.setStyleSheet("font-weight:bold;")
+            hint = QLabel(desc)
+            hint.setObjectName("MutedText")
+            hint.setWordWrap(True)
+            hint.setContentsMargins(22, 0, 0, 4)
+            gl.addWidget(chk)
+            gl.addWidget(hint)
+            self._checkboxes[key] = chk
+        layout.addWidget(grp)
+
+        quick_row = QHBoxLayout()
+        btn_all = QPushButton("Enable All")
+        btn_all.clicked.connect(lambda: self._set_all(True))
+        btn_none = QPushButton("Reset All to Rules-Legal")
+        btn_none.clicked.connect(lambda: self._set_all(False))
+        quick_row.addWidget(btn_all)
+        quick_row.addWidget(btn_none)
+        quick_row.addStretch()
+        layout.addLayout(quick_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _set_all(self, val: bool) -> None:
+        for chk in self._checkboxes.values():
+            chk.setChecked(val)
+
+    def selected_overrides(self) -> dict[str, bool]:
+        return {k: chk.isChecked() for k, chk in self._checkboxes.items()}
+
+
+class CustomAnimalFormDialog(QDialog):
+    """Dialog to create or edit a custom Animal / Wild Shape / Polymorph form."""
+
+    def __init__(
+        self,
+        initial_form: Optional[AnimalForm] = None,
+        existing_ids: Optional[set[str]] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._initial_form = initial_form
+        self._existing_ids = set(existing_ids or set())
+        self.setWindowTitle(
+            f"Edit Custom Animal Form — {initial_form.name}"
+            if initial_form
+            else "Create Custom Animal Form"
+        )
+        self.setMinimumSize(520, 620)
+
+        layout = QVBoxLayout(self)
+        form_l = QFormLayout()
+
+        self.txt_name = QLineEdit(initial_form.name if initial_form else "")
+        self.txt_name.setPlaceholderText("e.g. Frost Wolf, Giant Badger (Moon), Winter Stag…")
+        form_l.addRow("Form Name:", self.txt_name)
+
+        self.cmb_category = QComboBox()
+        for cat in ("Beast", "Elemental", "Monstrosity", "Fey", "Custom"):
+            self.cmb_category.addItem(cat, cat)
+        if initial_form:
+            idx = self.cmb_category.findData(initial_form.category)
+            if idx >= 0:
+                self.cmb_category.setCurrentIndex(idx)
+        form_l.addRow("Category:", self.cmb_category)
+
+        self.txt_creature_type = QLineEdit(initial_form.creature_type if initial_form else "Beast")
+        form_l.addRow("Creature Type:", self.txt_creature_type)
+
+        row_sz_cr = QHBoxLayout()
+        self.cmb_size = QComboBox()
+        for sz in ("Tiny", "Small", "Medium", "Large", "Huge", "Gargantuan"):
+            self.cmb_size.addItem(sz, sz)
+        self.cmb_size.setCurrentText(initial_form.size if initial_form else "Medium")
+        self.cmb_cr = QComboBox()
+        self.cmb_cr.setEditable(True)
+        for cr_opt in ("0", "1/8", "1/4", "1/2", *(str(i) for i in range(1, 21))):
+            self.cmb_cr.addItem(cr_opt)
+        self.cmb_cr.setCurrentText(initial_form.cr_label if initial_form else "1/4")
+        row_sz_cr.addWidget(self.cmb_size, 1)
+        row_sz_cr.addWidget(QLabel("CR:"))
+        row_sz_cr.addWidget(self.cmb_cr, 1)
+        form_l.addRow("Size / CR:", row_sz_cr)
+
+        row_def = QHBoxLayout()
+        self.spn_ac = QSpinBox()
+        self.spn_ac.setRange(1, 30)
+        self.spn_ac.setValue(initial_form.ac if initial_form else 13)
+        self.spn_hp = QSpinBox()
+        self.spn_hp.setRange(1, 999)
+        self.spn_hp.setValue(initial_form.hp if initial_form else 15)
+        row_def.addWidget(QLabel("AC:"))
+        row_def.addWidget(self.spn_ac)
+        row_def.addWidget(QLabel("HP:"))
+        row_def.addWidget(self.spn_hp)
+        row_def.addStretch()
+        form_l.addRow("Armor & HP:", row_def)
+
+        row_spd = QHBoxLayout()
+        self.spn_walk = QSpinBox()
+        self.spn_walk.setRange(0, 200)
+        self.spn_walk.setSingleStep(5)
+        self.spn_walk.setValue(initial_form.walk_speed if initial_form else 40)
+        self.spn_swim = QSpinBox()
+        self.spn_swim.setRange(0, 200)
+        self.spn_swim.setSingleStep(5)
+        self.spn_swim.setValue(initial_form.swim_speed if initial_form else 0)
+        self.spn_fly = QSpinBox()
+        self.spn_fly.setRange(0, 200)
+        self.spn_fly.setSingleStep(5)
+        self.spn_fly.setValue(initial_form.fly_speed if initial_form else 0)
+        row_spd.addWidget(QLabel("Walk:"))
+        row_spd.addWidget(self.spn_walk)
+        row_spd.addWidget(QLabel("Swim:"))
+        row_spd.addWidget(self.spn_swim)
+        row_spd.addWidget(QLabel("Fly:"))
+        row_spd.addWidget(self.spn_fly)
+        form_l.addRow("Speeds (ft.):", row_spd)
+
+        self.txt_speed = QLineEdit(initial_form.speed if initial_form else "")
+        self.txt_speed.setPlaceholderText("Optional speed override (e.g. 40 ft., climb 30 ft.) — auto-built if blank")
+        form_l.addRow("Speed Display:", self.txt_speed)
+
+        self.txt_senses = QLineEdit(initial_form.senses if initial_form else "Darkvision 60 ft., PP 12")
+        form_l.addRow("Senses:", self.txt_senses)
+        layout.addLayout(form_l)
+
+        ab_box = QGroupBox("Ability Scores")
+        ab_grid = QGridLayout(ab_box)
+        self.ab_spins: dict[str, QSpinBox] = {}
+        defaults = initial_form.abilities if initial_form else {
+            "strength": 14,
+            "dexterity": 14,
+            "constitution": 12,
+            "intelligence": 3,
+            "wisdom": 12,
+            "charisma": 6,
+        }
+        for idx, ab in enumerate(ABILITIES):
+            r, c = divmod(idx, 3)
+            spn = QSpinBox()
+            spn.setRange(1, 30)
+            spn.setValue(int(defaults.get(ab, 10)))
+            ab_grid.addWidget(QLabel(f"{ABILITY_ABBR[ab]}:"), r, c * 2)
+            ab_grid.addWidget(spn, r, c * 2 + 1)
+            self.ab_spins[ab] = spn
+        layout.addWidget(ab_box)
+
+        layout.addWidget(QLabel("Traits (one per line):"))
+        self.txt_traits = QPlainTextEdit()
+        self.txt_traits.setMaximumHeight(80)
+        self.txt_traits.setPlaceholderText("Pack Tactics: Advantage on attack rolls while an ally is within 5 ft.\nKeen Smell")
+        if initial_form and initial_form.traits:
+            self.txt_traits.setPlainText("\n".join(initial_form.traits))
+        layout.addWidget(self.txt_traits)
+
+        layout.addWidget(QLabel("Actions (one per line):"))
+        self.txt_actions = QPlainTextEdit()
+        self.txt_actions.setMaximumHeight(90)
+        self.txt_actions.setPlaceholderText("Bite (+5 to hit, 2d6+3 piercing)\nClaws (+5 to hit, 1d8+3 slashing)")
+        if initial_form and initial_form.actions:
+            self.txt_actions.setPlainText("\n".join(initial_form.actions))
+        layout.addWidget(self.txt_actions)
+
+        self.chk_add_known = QCheckBox("Add directly to Known / Saved Forms")
+        self.chk_add_known.setChecked(True)
+        layout.addWidget(self.chk_add_known)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        if not self.txt_name.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter a name for the custom animal form.")
+            return
+        self.accept()
+
+    def build_animal_form(self) -> AnimalForm:
+        import re as _re
+
+        name = self.txt_name.text().strip() or "Custom Animal Form"
+        if self._initial_form is not None:
+            fid = self._initial_form.id
+        else:
+            slug = _re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "form"
+            base_id = f"custom_{slug}"
+            fid = base_id
+            idx = 2
+            while fid in self._existing_ids:
+                fid = f"{base_id}_{idx}"
+                idx += 1
+
+        cr_label = self.cmb_cr.currentText().strip() or "0"
+        walk = self.spn_walk.value()
+        swim = self.spn_swim.value()
+        fly = self.spn_fly.value()
+        speed_txt = self.txt_speed.text().strip()
+        if not speed_txt:
+            parts = [f"{walk} ft."]
+            if swim > 0:
+                parts.append(f"swim {swim} ft.")
+            if fly > 0:
+                parts.append(f"fly {fly} ft.")
+            speed_txt = ", ".join(parts)
+
+        traits = [ln.strip() for ln in self.txt_traits.toPlainText().splitlines() if ln.strip()]
+        actions = [ln.strip() for ln in self.txt_actions.toPlainText().splitlines() if ln.strip()]
+        return AnimalForm(
+            id=fid,
+            name=name,
+            cr=parse_cr_label(cr_label),
+            cr_label=cr_label,
+            size=self.cmb_size.currentText() or "Medium",
+            creature_type=self.txt_creature_type.text().strip() or "Beast",
+            ac=self.spn_ac.value(),
+            hp=self.spn_hp.value(),
+            speed=speed_txt,
+            walk_speed=walk,
+            swim_speed=swim,
+            fly_speed=fly,
+            abilities={ab: spn.value() for ab, spn in self.ab_spins.items()},
+            senses=self.txt_senses.text().strip() or "PP 10",
+            traits=traits,
+            actions=actions,
+            category=self.cmb_category.currentData() or "Beast",
         )

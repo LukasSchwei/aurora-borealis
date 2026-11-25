@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import random
 import re
 import shutil
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QPointF, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -36,13 +37,47 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
+from ..animal_forms import (
+    ANIMAL_FORMS,
+    ANIMAL_FORMS_BY_ID,
+    all_animal_forms,
+    animal_form_from_dict,
+    animal_form_to_dict,
+    compute_animal_form_access,
+    compute_transformed_stats,
+    find_animal_form,
+    is_form_eligible,
+    render_animal_form_html,
+)
+from ..companions import (
+    COMPANION_TEMPLATES,
+    CompanionState,
+    compute_companion_stats,
+    create_companion_from_template,
+    export_companion_pdf,
+    load_dndcomp,
+    render_companion_sheet_html,
+    save_dndcomp,
+)
 from ..config import AppConfig, load_config, save_config
-from ..engine import RulesEngine, parse_weight_lb
+from ..engine import (
+    RulesEngine,
+    check_multiclass_prerequisites,
+    class_display_summary,
+    is_spell_concentration,
+    is_spell_eligible_for_caster,
+    is_spell_ritual,
+    parse_hit_die,
+    parse_weight_lb,
+    spell_classes,
+    spell_school,
+)
 from ..extractor import extract_msi_assets
 from ..library import delete_character, duplicate_character, scan_characters_folder
 from ..loader import ContentRepository
@@ -51,17 +86,37 @@ from ..models import (
     ABILITY_ABBR,
     ActiveSelection,
     CharacterState,
+    ClassLevel,
+    ClassSpellcasting,
     ComputedCharacter,
     Element,
     InventoryItem,
 )
 from ..paths import get_config_path, get_custom_dir, get_templates_dir
 from ..pdf_export import export_character_pdf, validate_character_for_pdf
-from ..persistence import encode_portrait_file, load_dnd5e, save_dnd5e
-from ..rules_55e import get_55e_background_abilities
+from ..persistence import default_character_extension, encode_portrait_file, load_dnd5e, save_dnd5e
+from ..platform_utils import is_windows
+from ..rules_55e import (
+    DIVINE_ORDER_55E,
+    PRIMAL_ORDER_55E,
+    WEAPON_MASTERY_DESCRIPTIONS,
+    WEAPON_MASTERY_TABLE,
+    check_55e_heavy_weapon_requirement,
+    get_55e_background_abilities,
+    get_weapon_mastery,
+)
 from .character_select import CharacterSelectView
-from .dialogs import DuplicateReportDialog, MagicGearDialog, NewCharacterDialog, pixmap_from_portrait
+from .companion_view import CompanionEditorView
+from .dialogs import (
+    CustomAnimalFormDialog,
+    DuplicateReportDialog,
+    MagicGearDialog,
+    NewCharacterDialog,
+    RuleOverridesDialog,
+    pixmap_from_portrait,
+)
 from .github_view import GitHubContentView
+from .level_up_wizard import LevelUpWizardDialog
 from .styles import DARK_STYLESHEET, LIGHT_STYLESHEET, get_stylesheet
 
 POINT_BUY_COSTS = {8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9}
@@ -71,9 +126,10 @@ def _fmt_mod(val: int) -> str:
     return f"+{val}" if val >= 0 else str(val)
 
 
-def _safe_filename(name: str) -> str:
+def _safe_filename(name: str, ruleset: str = "5e") -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", (name or "character").strip().lower()).strip("_")
-    return f"{cleaned or 'character'}.dnd5e"
+    ext = default_character_extension(ruleset)
+    return f"{cleaned or 'character'}{ext}"
 
 
 _RARITY_TABLE: dict[str, tuple[int, str, str, str, str]] = {
@@ -141,6 +197,153 @@ def _make_magic_sparkles_pixmap(color_hex: str, size: int = 14) -> QPixmap:
     draw_star(size * 0.76, size * 0.74, size * 0.17)
     painter.end()
     return pix
+
+
+@functools.lru_cache(maxsize=64)
+def _spell_level_icon(lvl: str) -> QIcon:
+    lvl_colors = {
+        "0": ("#94a3b8", "#1e293b"),
+        "1": ("#38bdf8", "#0c2d48"),
+        "2": ("#34d399", "#064e3b"),
+        "3": ("#fb923c", "#3b1d0a"),
+        "4": ("#f472b6", "#500724"),
+        "5": ("#c084fc", "#2e1065"),
+        "6": ("#facc15", "#422006"),
+        "7": ("#f87171", "#450a0a"),
+        "8": ("#2dd4bf", "#042f2e"),
+        "9": ("#fbbf24", "#451a03"),
+    }
+    fg, bg = lvl_colors.get(str(lvl), ("#7dd3fc", "#1e3a5f"))
+    pix = QPixmap(24, 24)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setBrush(QColor(bg))
+    p.setPen(QPen(QColor(fg), 1.5))
+    p.drawEllipse(2, 2, 20, 20)
+    f = QFont("Sans Serif", 9)
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(QColor(fg))
+    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, str(lvl))
+    p.end()
+    return QIcon(pix)
+
+
+@functools.lru_cache(maxsize=32)
+def _spell_school_icon(school: str) -> QIcon:
+    school_colors = {
+        "abjuration": ("#60a5fa", "#0c2d48", "Ab"),
+        "conjuration": ("#fbbf24", "#451a03", "Cj"),
+        "divination": ("#38bdf8", "#082f49", "Dv"),
+        "enchantment": ("#f472b6", "#500724", "En"),
+        "evocation": ("#f87171", "#450a0a", "Ev"),
+        "illusion": ("#c084fc", "#2e1065", "Il"),
+        "necromancy": ("#4ade80", "#052e16", "Nc"),
+        "transmutation": ("#fb923c", "#431407", "Tr"),
+    }
+    fg, bg, abbr = school_colors.get((school or "").strip().lower(), ("#94a3b8", "#1e293b", "—"))
+    pix = QPixmap(24, 24)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setBrush(QColor(bg))
+    p.setPen(QPen(QColor(fg), 1.4))
+    p.drawRoundedRect(2, 2, 20, 20, 5, 5)
+    f = QFont("Sans Serif", 8)
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(QColor(fg))
+    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, abbr)
+    p.end()
+    return QIcon(pix)
+
+
+@functools.lru_cache(maxsize=8)
+def _spell_tags_icon(is_ritual: bool, is_conc: bool) -> QIcon:
+    if not is_ritual and not is_conc:
+        return QIcon()
+    w = 46 if (is_ritual and is_conc) else 24
+    pix = QPixmap(w, 24)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    f = QFont("Sans Serif", 8)
+    f.setBold(True)
+    p.setFont(f)
+    x = 2
+    if is_ritual:
+        p.setBrush(QColor("#083344"))
+        p.setPen(QPen(QColor("#22d3ee"), 1.4))
+        p.drawEllipse(x, 2, 20, 20)
+        p.setPen(QColor("#22d3ee"))
+        p.drawText(x, 2, 20, 20, Qt.AlignmentFlag.AlignCenter, "R")
+        x += 22
+    if is_conc:
+        p.setBrush(QColor("#451a03"))
+        p.setPen(QPen(QColor("#fbbf24"), 1.4))
+        cx, cy = x + 10.0, 12.0
+        diamond = QPainterPath()
+        diamond.moveTo(cx, 2.0)
+        diamond.lineTo(cx + 10.0, cy)
+        diamond.lineTo(cx, 22.0)
+        diamond.lineTo(cx - 10.0, cy)
+        diamond.closeSubpath()
+        p.drawPath(diamond)
+        p.setPen(QColor("#fbbf24"))
+        p.drawText(x, 2, 20, 20, Qt.AlignmentFlag.AlignCenter, "C")
+    p.end()
+    return QIcon(pix)
+
+
+@functools.lru_cache(maxsize=16)
+def _equip_type_icon(el_type: str) -> QIcon:
+    pix = QPixmap(28, 28)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    if el_type == "Magic Item":
+        p.setBrush(QColor("#331829"))
+        p.setPen(QPen(QColor("#f472b6"), 1.6))
+        p.drawEllipse(1, 1, 26, 26)
+        sp = _make_magic_sparkles_pixmap("#f472b6", 16)
+        p.drawPixmap(6, 6, sp)
+        p.end()
+        return QIcon(pix)
+    icon_map = {
+        "Weapon": ("⚔", "#e2e8f0", "#292524", "#a8a29e"),
+        "Armor": ("🛡", "#67e8f9", "#162c36", "#22d3ee"),
+        "Item": ("●", "#9ca3af", "#1f2937", "#6b7280"),
+    }
+    glyph, fg, bg, border = icon_map.get(el_type, ("●", "#9ca3af", "#1f2937", "#6b7280"))
+    p.setBrush(QColor(bg))
+    p.setPen(QPen(QColor(border), 1.6))
+    p.drawEllipse(1, 1, 26, 26)
+    p.setPen(QColor(fg))
+    f = QFont("Sans Serif", 11)
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
+    p.end()
+    return QIcon(pix)
+
+
+@functools.lru_cache(maxsize=16)
+def _equip_rarity_icon(r_letter: str, r_fg: str, r_bg: str) -> QIcon:
+    pix = QPixmap(28, 28)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setBrush(QColor(r_bg))
+    p.setPen(QPen(QColor(r_fg), 1.6))
+    p.drawEllipse(1, 1, 26, 26)
+    p.setPen(QColor(r_fg))
+    f = QFont("Sans Serif", 11)
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, r_letter)
+    p.end()
+    return QIcon(pix)
 
 
 class _CatalogSelectorTab(QWidget):
@@ -289,26 +492,46 @@ class _CatalogSelectorTab(QWidget):
 
 
 def _make_kde_win_icon(kind: str, color_hex: str, size: int = 16) -> QIcon:
-    """Use system KDE/Freedesktop window control icon if available, else draw crisp KDE Breeze vector."""
-    theme_map = {
-        "minimize": ("window-minimize-symbolic", "window-minimize"),
-        "maximize": ("window-maximize-symbolic", "window-maximize"),
-        "restore": ("window-restore-symbolic", "window-restore"),
-        "close": ("window-close-symbolic", "window-close"),
-    }
-    for tname in theme_map.get(kind, ()):
-        ic = QIcon.fromTheme(tname)
-        if not ic.isNull():
-            return ic
+    """Use system theme window control icon if available, else draw Windows 11 or KDE Breeze vector."""
+    if not is_windows():
+        theme_map = {
+            "minimize": ("window-minimize-symbolic", "window-minimize"),
+            "maximize": ("window-maximize-symbolic", "window-maximize"),
+            "restore": ("window-restore-symbolic", "window-restore"),
+            "close": ("window-close-symbolic", "window-close"),
+        }
+        for tname in theme_map.get(kind, ()):
+            ic = QIcon.fromTheme(tname)
+            if not ic.isNull():
+                return ic
 
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    pen = QPen(QColor(color_hex), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, not is_windows())
+    pen = QPen(QColor(color_hex), 1.4 if is_windows() else 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
     m = size * 0.28
     mid = size * 0.5
+    if is_windows():
+        if kind == "minimize":
+            p.drawLine(QPointF(m, mid + 1.0), QPointF(size - m, mid + 1.0))
+        elif kind == "maximize":
+            p.drawRect(int(m), int(m), int(size - 2 * m), int(size - 2 * m))
+        elif kind == "restore":
+            s = int(size - 2 * m - 2)
+            p.drawRect(int(m), int(m + 2), s, s)
+            p.drawLine(int(m + 2), int(m + 2), int(m + 2), int(m))
+            p.drawLine(int(m + 2), int(m), int(m + 2 + s), int(m))
+            p.drawLine(int(m + 2 + s), int(m), int(m + 2 + s), int(m + s))
+            p.drawLine(int(m + s), int(m + s), int(m + 2 + s), int(m + s))
+        else:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.drawLine(QPointF(m, m), QPointF(size - m, size - m))
+            p.drawLine(QPointF(size - m, m), QPointF(m, size - m))
+        p.end()
+        return QIcon(pix)
+
     if kind == "minimize":
         # KDE Breeze downward chevron
         p.drawLine(QPointF(m, mid - 1.5), QPointF(mid, mid + 2.5))
@@ -500,13 +723,23 @@ class MainWindow(QMainWindow):
         self._equip_sort_order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
         self._spell_sort_col: int = 0
         self._spell_sort_order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
+        self._choices_sig: Optional[tuple] = None
+        self._spell_catalog_sig: Optional[tuple] = None
+        self._equip_catalog_sig: Optional[tuple] = None
 
         # Start new character with NOTHING pre-selected
         self.state = CharacterState()
         self.computed: ComputedCharacter = self.engine.evaluate(self.state)
 
         self.setWindowTitle("Aurora Borealis — D&D 5e / 5.5e Character Builder")
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        win_flags = Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        if is_windows():
+            win_flags |= (
+                Qt.WindowType.WindowMinimizeButtonHint
+                | Qt.WindowType.WindowMaximizeButtonHint
+                | Qt.WindowType.WindowSystemMenuHint
+            )
+        self.setWindowFlags(win_flags)
         self.setMouseTracking(True)
         self._icon_path = Path(__file__).resolve().parent.parent / "assets" / "aurora-borealis.svg"
         if self._icon_path.is_file():
@@ -569,9 +802,12 @@ class MainWindow(QMainWindow):
         # Screen 1: Character Selection
         self.select_view = CharacterSelectView()
         self.select_view.open_character_requested.connect(self.open_character_file)
+        self.select_view.open_companion_requested.connect(self.open_companion_file)
         self.select_view.new_character_requested.connect(self.new_character_with_dialog)
+        self.select_view.new_companion_requested.connect(self.new_companion)
         self.select_view.import_dnd5e_requested.connect(self.import_dnd5e_to_library)
         self.select_view.export_pdf_requested.connect(self._export_pdf_for_path)
+        self.select_view.export_companion_pdf_requested.connect(self._export_companion_pdf_for_path)
         self.select_view.duplicate_character_requested.connect(self._duplicate_library_char)
         self.select_view.delete_character_requested.connect(self._delete_library_char)
         self.select_view.toggle_favorite_requested.connect(self._toggle_favorite)
@@ -589,9 +825,18 @@ class MainWindow(QMainWindow):
         # Screen 3: 10-Tab Clickable Character Builder
         self.builder_view = self._build_builder_screen()
 
+        # Screen 4: Standalone Companion Sheet & Editor (.dndcomp)
+        self._editing_attached_companion_idx: Optional[int] = None
+        self.companion_view = CompanionEditorView()
+        self.companion_view.set_characters_dir(self._characters_dir())
+        self.companion_view.back_requested.connect(self._on_companion_back)
+        self.companion_view.saved.connect(self._on_companion_saved)
+        self.companion_view.deleted.connect(lambda _p: self.refresh_library())
+
         self.screen_stack.addWidget(self.select_view)
         self.screen_stack.addWidget(self.github_view)
         self.screen_stack.addWidget(self.builder_view)
+        self.screen_stack.addWidget(self.companion_view)
         self._update_status_summary()
 
     def apply_theme(self, theme: str, persist: bool = True) -> None:
@@ -633,6 +878,21 @@ class MainWindow(QMainWindow):
                     event.accept()
                     return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if not self.isMaximized():
+            edges = self._edge_at(event.position().toPoint())
+            if edges in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge):
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif edges in (Qt.Edge.RightEdge | Qt.Edge.TopEdge, Qt.Edge.LeftEdge | Qt.Edge.BottomEdge):
+                self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge):
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            else:
+                self.unsetCursor()
+        super().mouseMoveEvent(event)
 
     def apply_scale(self, scale: float, persist: bool = True) -> None:
         clamped = max(0.85, min(1.5, float(scale)))
@@ -727,6 +987,10 @@ class MainWindow(QMainWindow):
         tb_layout.addWidget(self.lbl_top_ruleset)
         tb_layout.addStretch()
 
+        self.btn_rule_overrides = QPushButton("⚙ Rule Overrides…")
+        self.btn_rule_overrides.clicked.connect(self.open_rule_overrides_dialog)
+        self.btn_level_up = QPushButton("⬆ Level Up…")
+        self.btn_level_up.clicked.connect(self.open_level_up_wizard)
         btn_save = QPushButton("Save")
         btn_save.setObjectName("PrimaryBtn")
         btn_save.clicked.connect(self.save_character)
@@ -735,6 +999,8 @@ class MainWindow(QMainWindow):
         btn_gh = QPushButton("Content (GitHub / 5e.tools)")
         btn_gh.clicked.connect(self.show_github_manager)
 
+        tb_layout.addWidget(self.btn_rule_overrides)
+        tb_layout.addWidget(self.btn_level_up)
         tb_layout.addWidget(btn_save)
         tb_layout.addWidget(btn_pdf)
         tb_layout.addWidget(btn_gh)
@@ -759,8 +1025,12 @@ class MainWindow(QMainWindow):
             on_clear_id=lambda: self.select_race_by_id(""),
         )
 
-        cls_lvl_widget = QWidget()
-        clw = QHBoxLayout(cls_lvl_widget)
+        cls_top_widget = QWidget()
+        cls_top_v = QVBoxLayout(cls_top_widget)
+        cls_top_v.setContentsMargins(0, 0, 0, 0)
+        cls_top_v.setSpacing(8)
+
+        clw = QHBoxLayout()
         clw.setContentsMargins(0, 0, 0, 0)
         clw.addWidget(QLabel("Character Level:"))
         btn_lvl_m = QPushButton("-")
@@ -776,10 +1046,32 @@ class MainWindow(QMainWindow):
         btn_lvl_p = QPushButton("+")
         btn_lvl_p.setObjectName("StepperBtn")
         btn_lvl_p.clicked.connect(lambda: self.spn_level.setValue(min(20, self.spn_level.value() + 1)))
+        self.btn_class_level_up = QPushButton("⬆ Level Up Wizard…")
+        self.btn_class_level_up.clicked.connect(self.open_level_up_wizard)
         clw.addWidget(btn_lvl_m)
         clw.addWidget(self.spn_level)
         clw.addWidget(btn_lvl_p)
+        clw.addSpacing(8)
+        clw.addWidget(self.btn_class_level_up)
         clw.addStretch()
+        cls_top_v.addLayout(clw)
+
+        self.multiclass_group = QGroupBox("Classes & Multiclassing")
+        mc_v = QVBoxLayout(self.multiclass_group)
+        mc_v.setContentsMargins(8, 8, 8, 8)
+        mc_v.setSpacing(6)
+        self.multiclass_rows_layout = QVBoxLayout()
+        self.multiclass_rows_layout.setSpacing(4)
+        mc_v.addLayout(self.multiclass_rows_layout)
+
+        mc_add_row = QHBoxLayout()
+        self.cmb_add_multiclass = QComboBox()
+        self.btn_add_multiclass = QPushButton("+ Add Multiclass")
+        self.btn_add_multiclass.clicked.connect(self._on_add_multiclass_clicked)
+        mc_add_row.addWidget(self.cmb_add_multiclass, 1)
+        mc_add_row.addWidget(self.btn_add_multiclass)
+        mc_v.addLayout(mc_add_row)
+        cls_top_v.addWidget(self.multiclass_group)
 
         self.tab_class = _CatalogSelectorTab(
             self.repo,
@@ -787,7 +1079,7 @@ class MainWindow(QMainWindow):
             "Class",
             on_select_id=self.select_class_by_id,
             on_clear_id=lambda: self.select_class_by_id(""),
-            extra_top_widget=cls_lvl_widget,
+            extra_top_widget=cls_top_widget,
         )
 
         # 5.5e Official Background ASI controls inside Background tab
@@ -995,7 +1287,11 @@ class MainWindow(QMainWindow):
         lvl_row.addWidget(btn_lm)
         lvl_row.addWidget(self.lbl_overview_level)
         lvl_row.addWidget(btn_lp)
-        lvl_row.addSpacing(18)
+        lvl_row.addSpacing(12)
+        self.btn_overview_level_up = QPushButton("⬆ Level Up Wizard…")
+        self.btn_overview_level_up.clicked.connect(self.open_level_up_wizard)
+        lvl_row.addWidget(self.btn_overview_level_up)
+        lvl_row.addSpacing(12)
         lvl_row.addWidget(QLabel("XP:"))
         self.spn_xp = QSpinBox()
         self.spn_xp.setRange(0, 999999)
@@ -1009,6 +1305,91 @@ class MainWindow(QMainWindow):
         form.addRow("Ruleset:", self.cmb_ruleset)
         form.addRow("Level / XP:", lvl_row)
         layout.addWidget(top_box)
+
+        # Hit Points Mode (Average vs Rolled / Manual)
+        self.hp_group = QGroupBox("Hit Points Calculation")
+        hp_v = QVBoxLayout(self.hp_group)
+        hp_v.setSpacing(8)
+        hp_top = QHBoxLayout()
+        hp_top.addWidget(QLabel("HP Mode:"))
+        self.cmb_hp_mode = QComboBox()
+        self.cmb_hp_mode.addItem("Average (Fixed)", "average")
+        self.cmb_hp_mode.addItem("Rolled / Manual", "rolled")
+        self.cmb_hp_mode.currentIndexChanged.connect(self._on_hp_mode_changed)
+        self.btn_roll_all_hp = QPushButton("🎲 Roll All HP")
+        self.btn_roll_all_hp.clicked.connect(self._roll_all_hp)
+        self.btn_reset_avg_hp = QPushButton("Reset to Average")
+        self.btn_reset_avg_hp.clicked.connect(self._reset_average_hp)
+        self.lbl_hp_formula = QLabel("Max HP: 0")
+        self.lbl_hp_formula.setObjectName("AccentText")
+        hp_top.addWidget(self.cmb_hp_mode)
+        hp_top.addWidget(self.btn_roll_all_hp)
+        hp_top.addWidget(self.btn_reset_avg_hp)
+        hp_top.addSpacing(12)
+        hp_top.addWidget(self.lbl_hp_formula, 1)
+        hp_v.addLayout(hp_top)
+
+        self.tbl_hp_rolls = QTableWidget(0, 6)
+        self.tbl_hp_rolls.setHorizontalHeaderLabels(["Lvl", "Class", "Die", "Roll", "CON", "Total"])
+        hp_hdr = self.tbl_hp_rolls.horizontalHeader()
+        hp_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        hp_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hp_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        hp_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        hp_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        hp_hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.tbl_hp_rolls.setColumnWidth(0, 44)
+        self.tbl_hp_rolls.setColumnWidth(2, 54)
+        self.tbl_hp_rolls.setColumnWidth(3, 145)
+        self.tbl_hp_rolls.setColumnWidth(4, 54)
+        self.tbl_hp_rolls.setColumnWidth(5, 62)
+        self.tbl_hp_rolls.verticalHeader().setVisible(False)
+        self.tbl_hp_rolls.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tbl_hp_rolls.setMaximumHeight(190)
+        hp_v.addWidget(self.tbl_hp_rolls)
+        layout.addWidget(self.hp_group)
+
+        # 5.5e Rules & Combat Status (Heroic Inspiration, Exhaustion, Divine/Primal Order)
+        self.rules_55e_group = QGroupBox("5.5e (2024) Mechanics & Orders")
+        r55_v = QVBoxLayout(self.rules_55e_group)
+        r55_row = QHBoxLayout()
+        self.chk_heroic_inspiration = QCheckBox("Heroic Inspiration")
+        self.chk_heroic_inspiration.stateChanged.connect(self._on_55e_controls_changed)
+        r55_row.addWidget(self.chk_heroic_inspiration)
+        r55_row.addSpacing(12)
+        r55_row.addWidget(QLabel("Exhaustion (0–6):"))
+        self.spn_exhaustion = QSpinBox()
+        self.spn_exhaustion.setRange(0, 6)
+        self.spn_exhaustion.setFixedWidth(56)
+        self.spn_exhaustion.valueChanged.connect(self._on_55e_controls_changed)
+        r55_row.addWidget(self.spn_exhaustion)
+        r55_row.addSpacing(12)
+
+        self.lbl_divine_order = QLabel("Divine Order:")
+        self.cmb_divine_order = QComboBox()
+        self.cmb_divine_order.addItem("— Choose —", "")
+        for k, desc in DIVINE_ORDER_55E.items():
+            self.cmb_divine_order.addItem(desc, k)
+        self.cmb_divine_order.currentIndexChanged.connect(self._on_55e_controls_changed)
+        r55_row.addWidget(self.lbl_divine_order)
+        r55_row.addWidget(self.cmb_divine_order)
+
+        self.lbl_primal_order = QLabel("Primal Order:")
+        self.cmb_primal_order = QComboBox()
+        self.cmb_primal_order.addItem("— Choose —", "")
+        for k, desc in PRIMAL_ORDER_55E.items():
+            self.cmb_primal_order.addItem(desc, k)
+        self.cmb_primal_order.currentIndexChanged.connect(self._on_55e_controls_changed)
+        r55_row.addWidget(self.lbl_primal_order)
+        r55_row.addWidget(self.cmb_primal_order)
+        r55_row.addStretch()
+        r55_v.addLayout(r55_row)
+
+        self.lbl_55e_notes = QLabel("")
+        self.lbl_55e_notes.setObjectName("MutedText")
+        self.lbl_55e_notes.setWordWrap(True)
+        r55_v.addWidget(self.lbl_55e_notes)
+        layout.addWidget(self.rules_55e_group)
 
         # Clickable Quick-Jump Step Cards
         cards_grid = QGridLayout()
@@ -1232,14 +1613,137 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        feat_group = QGroupBox("Granted Features, Proficiencies & Languages")
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        self.tab6_right_tabs = QTabWidget()
+
+        feat_group = QWidget()
         feat_layout = QVBoxLayout(feat_group)
         self.lst_features = QListWidget()
         self.lst_features.currentItemChanged.connect(self._on_feature_selected)
         feat_layout.addWidget(self.lst_features, 1)
         self.feat_desc_browser = QTextBrowser()
         feat_layout.addWidget(self.feat_desc_browser, 1)
-        right_layout.addWidget(feat_group)
+        self.tab6_right_tabs.addTab(feat_group, "Features, Proficiencies & Languages")
+
+        # Sub-tab: Animal Forms / Wild Shape
+        forms_w = QWidget()
+        fw_l = QVBoxLayout(forms_w)
+        af_hdr = QHBoxLayout()
+        self.lbl_animal_access = QLabel("Wild Shape / Animal Forms")
+        self.lbl_animal_access.setObjectName("AccentText")
+        self.lbl_animal_access.setWordWrap(True)
+        self.chk_override_animal_forms = QCheckBox("Allow all animal forms (manual override)")
+        self.chk_override_animal_forms.stateChanged.connect(self._on_animal_override_toggled)
+        af_hdr.addWidget(self.lbl_animal_access, 1)
+        af_hdr.addWidget(self.chk_override_animal_forms)
+        fw_l.addLayout(af_hdr)
+
+        af_filter = QHBoxLayout()
+        self.txt_animal_search = QLineEdit()
+        self.txt_animal_search.setPlaceholderText("Search beast / elemental forms…")
+        self.txt_animal_search.textChanged.connect(self._refresh_animal_forms_table)
+        self.cmb_animal_cr = QComboBox()
+        self.cmb_animal_cr.addItem("Eligible Forms Only", "eligible")
+        self.cmb_animal_cr.addItem("All Forms", "all")
+        self.cmb_animal_cr.currentIndexChanged.connect(self._refresh_animal_forms_table)
+        af_filter.addWidget(self.txt_animal_search, 2)
+        af_filter.addWidget(self.cmb_animal_cr, 1)
+        fw_l.addLayout(af_filter)
+
+        af_split = QSplitter(Qt.Orientation.Vertical)
+        self.tbl_animal_forms = QTableWidget(0, 4)
+        self.tbl_animal_forms.setHorizontalHeaderLabels(["Form", "CR", "Speed", "Status"])
+        self.tbl_animal_forms.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tbl_animal_forms.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_animal_forms.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_animal_forms.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_animal_forms.verticalHeader().setVisible(False)
+        self.tbl_animal_forms.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tbl_animal_forms.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tbl_animal_forms.currentCellChanged.connect(self._on_animal_form_selected)
+        af_split.addWidget(self.tbl_animal_forms)
+
+        af_btns = QHBoxLayout()
+        self.btn_add_animal_form = QPushButton("+ Add Known Form")
+        self.btn_add_animal_form.setObjectName("PrimaryBtn")
+        self.btn_add_animal_form.clicked.connect(self._add_selected_animal_form)
+        self.btn_rem_animal_form = QPushButton("Remove Form")
+        self.btn_rem_animal_form.clicked.connect(self._remove_selected_animal_form)
+        self.btn_toggle_active_form = QPushButton("Activate / Revert Wild Shape")
+        self.btn_toggle_active_form.clicked.connect(self._toggle_active_animal_form)
+        af_btns.addWidget(self.btn_add_animal_form)
+        af_btns.addWidget(self.btn_rem_animal_form)
+        af_btns.addWidget(self.btn_toggle_active_form)
+        fw_l.addLayout(af_btns)
+
+        af_custom_btns = QHBoxLayout()
+        self.btn_custom_animal_form = QPushButton("+ Custom Form…")
+        self.btn_custom_animal_form.clicked.connect(self._create_custom_animal_form)
+        self.btn_edit_custom_animal_form = QPushButton("Edit Custom…")
+        self.btn_edit_custom_animal_form.clicked.connect(self._edit_selected_custom_animal_form)
+        af_custom_btns.addWidget(self.btn_custom_animal_form)
+        af_custom_btns.addWidget(self.btn_edit_custom_animal_form)
+        af_custom_btns.addStretch()
+        fw_l.addLayout(af_custom_btns)
+
+        self.lbl_known_animal_forms = QLabel("Known / Saved Forms: None")
+        self.lbl_known_animal_forms.setObjectName("MutedText")
+        self.lbl_known_animal_forms.setWordWrap(True)
+        fw_l.addWidget(self.lbl_known_animal_forms)
+
+        self.animal_form_browser = QTextBrowser()
+        af_split.addWidget(self.animal_form_browser)
+        af_split.setSizes([220, 220])
+        fw_l.addWidget(af_split, 1)
+        self.tab6_right_tabs.addTab(forms_w, "Animal Forms")
+
+        # Sub-tab: Companions
+        comp_w = QWidget()
+        cw_l = QVBoxLayout(comp_w)
+        cmp_top = QHBoxLayout()
+        self.cmb_companion_tpl = QComboBox()
+        for k, tpl in COMPANION_TEMPLATES.items():
+            self.cmb_companion_tpl.addItem(tpl["name"], k)
+        self.btn_add_companion = QPushButton("+ Add Companion")
+        self.btn_add_companion.setObjectName("PrimaryBtn")
+        self.btn_add_companion.clicked.connect(self._add_companion_from_template)
+        self.btn_import_companion = QPushButton("Import .dndcomp…")
+        self.btn_import_companion.clicked.connect(self._import_companion_to_character)
+        cmp_top.addWidget(self.cmb_companion_tpl, 1)
+        cmp_top.addWidget(self.btn_add_companion)
+        cmp_top.addWidget(self.btn_import_companion)
+        cw_l.addLayout(cmp_top)
+
+        self.chk_override_companions = QCheckBox("Allow all companion templates (manual override)")
+        self.chk_override_companions.stateChanged.connect(self._on_companion_override_toggled)
+        cw_l.addWidget(self.chk_override_companions)
+
+        self.lst_char_companions = QListWidget()
+        self.lst_char_companions.currentRowChanged.connect(self._on_char_companion_selected)
+        cw_l.addWidget(self.lst_char_companions, 1)
+
+        cmp_btns = QHBoxLayout()
+        self.btn_open_companion = QPushButton("Open Companion Sheet")
+        self.btn_open_companion.setObjectName("PrimaryBtn")
+        self.btn_open_companion.clicked.connect(self._open_selected_attached_companion)
+        self.btn_save_comp_file = QPushButton("Save as .dndcomp…")
+        self.btn_save_comp_file.clicked.connect(self._save_selected_companion_standalone)
+        self.btn_export_comp_pdf = QPushButton("Export Companion PDF")
+        self.btn_export_comp_pdf.clicked.connect(self._export_selected_companion_pdf)
+        self.btn_remove_companion = QPushButton("Remove")
+        self.btn_remove_companion.setObjectName("DangerBtn")
+        self.btn_remove_companion.clicked.connect(self._remove_selected_companion)
+        cmp_btns.addWidget(self.btn_open_companion)
+        cmp_btns.addWidget(self.btn_save_comp_file)
+        cmp_btns.addWidget(self.btn_export_comp_pdf)
+        cmp_btns.addWidget(self.btn_remove_companion)
+        cw_l.addLayout(cmp_btns)
+
+        self.companion_preview_browser = QTextBrowser()
+        cw_l.addWidget(self.companion_preview_browser, 2)
+        self.tab6_right_tabs.addTab(comp_w, "Companions")
+
+        right_layout.addWidget(self.tab6_right_tabs)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
@@ -1322,7 +1826,8 @@ class MainWindow(QMainWindow):
         self.tbl_equip_catalog.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.tbl_equip_catalog.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_equip_catalog.verticalHeader().setVisible(False)
-        self.tbl_equip_catalog.verticalHeader().setDefaultSectionSize(34)
+        self.tbl_equip_catalog.verticalHeader().setDefaultSectionSize(36)
+        self.tbl_equip_catalog.setIconSize(QSize(28, 28))
         eq_hdr = self.tbl_equip_catalog.horizontalHeader()
         eq_hdr.setSectionsClickable(True)
         eq_hdr.setSortIndicatorShown(True)
@@ -1332,7 +1837,7 @@ class MainWindow(QMainWindow):
         eq_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         eq_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         eq_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.tbl_equip_catalog.setColumnWidth(0, 46)
+        self.tbl_equip_catalog.setColumnWidth(0, 48)
         self.tbl_equip_catalog.setColumnWidth(2, 58)
         self.tbl_equip_catalog.setColumnWidth(3, 66)
         self.tbl_equip_catalog.setColumnWidth(4, 72)
@@ -1382,7 +1887,35 @@ class MainWindow(QMainWindow):
         self.equip_desc_browser = QTextBrowser()
         eq_dl.addWidget(self.equip_desc_browser)
 
+        self.mastery_55e_group = QGroupBox("5.5e Weapon Masteries")
+        m55_l = QVBoxLayout(self.mastery_55e_group)
+        m55_top = QHBoxLayout()
+        self.lbl_mastery_limit = QLabel("Masteries: 0 / 0")
+        self.lbl_mastery_limit.setObjectName("AccentText")
+        self.chk_override_mastery = QCheckBox("Override mastery limit")
+        self.chk_override_mastery.stateChanged.connect(self._on_mastery_override_toggled)
+        m55_top.addWidget(self.lbl_mastery_limit, 1)
+        m55_top.addWidget(self.chk_override_mastery)
+        m55_l.addLayout(m55_top)
+        m55_pick = QHBoxLayout()
+        self.cmb_mastery_weapon = QComboBox()
+        for wname, mprop in sorted(WEAPON_MASTERY_TABLE.items()):
+            self.cmb_mastery_weapon.addItem(f"{wname.title()} ({mprop})", wname.title())
+        self.btn_add_mastery = QPushButton("+ Add Mastery")
+        self.btn_add_mastery.clicked.connect(self._add_weapon_mastery)
+        self.btn_rem_mastery = QPushButton("Remove")
+        self.btn_rem_mastery.clicked.connect(self._remove_weapon_mastery)
+        m55_pick.addWidget(self.cmb_mastery_weapon, 1)
+        m55_pick.addWidget(self.btn_add_mastery)
+        m55_pick.addWidget(self.btn_rem_mastery)
+        m55_l.addLayout(m55_pick)
+        self.lbl_mastery_active = QLabel("Active Masteries: None")
+        self.lbl_mastery_active.setObjectName("MutedText")
+        self.lbl_mastery_active.setWordWrap(True)
+        m55_l.addWidget(self.lbl_mastery_active)
+
         right_eq_l.addWidget(inv_box, 2)
+        right_eq_l.addWidget(self.mastery_55e_group)
         right_eq_l.addWidget(eq_desc_box, 1)
 
         splitter.addWidget(cat_box)
@@ -1422,6 +1955,9 @@ class MainWindow(QMainWindow):
         self.txt_spell_search = QLineEdit()
         self.txt_spell_search.setPlaceholderText("Search spells…")
         self.txt_spell_search.textChanged.connect(self._refresh_spell_catalog)
+        self.cmb_spell_caster = QComboBox()
+        self.cmb_spell_caster.addItem("All Spells", "__all__")
+        self.cmb_spell_caster.currentIndexChanged.connect(self._refresh_spell_catalog)
         self.cmb_spell_level = QComboBox()
         self.cmb_spell_level.addItem("All Levels", "")
         self.cmb_spell_level.addItem("Cantrip (0)", "0")
@@ -1429,10 +1965,16 @@ class MainWindow(QMainWindow):
             self.cmb_spell_level.addItem(f"Level {lvl}", str(lvl))
         self.cmb_spell_level.currentIndexChanged.connect(self._refresh_spell_catalog)
         f_row.addWidget(self.txt_spell_search, 2)
+        f_row.addWidget(self.cmb_spell_caster, 1)
         f_row.addWidget(self.cmb_spell_level, 1)
         cat_layout.addLayout(f_row)
 
         f_row2 = QHBoxLayout()
+        self.cmb_spell_class = QComboBox()
+        self.cmb_spell_class.addItem("All Classes", "")
+        for cname in self.repo.available_spell_classes():
+            self.cmb_spell_class.addItem(cname, cname.lower())
+        self.cmb_spell_class.currentIndexChanged.connect(self._refresh_spell_catalog)
         self.cmb_spell_school = QComboBox()
         self.cmb_spell_school.addItem("All Schools", "")
         for school in (
@@ -1452,24 +1994,30 @@ class MainWindow(QMainWindow):
         self.cmb_spell_prop.addItem("Ritual", "ritual")
         self.cmb_spell_prop.addItem("Concentration", "concentration")
         self.cmb_spell_prop.currentIndexChanged.connect(self._refresh_spell_catalog)
+        f_row2.addWidget(self.cmb_spell_class, 1)
         f_row2.addWidget(self.cmb_spell_school, 1)
         f_row2.addWidget(self.cmb_spell_prop, 1)
         cat_layout.addLayout(f_row2)
 
-        self.tbl_spell_catalog = QTableWidget(0, 2)
-        self.tbl_spell_catalog.setHorizontalHeaderLabels(["Name", "Level"])
+        self.tbl_spell_catalog = QTableWidget(0, 4)
+        self.tbl_spell_catalog.setHorizontalHeaderLabels(["Name", "Level", "School", "R / C"])
         self.tbl_spell_catalog.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_spell_catalog.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.tbl_spell_catalog.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_spell_catalog.verticalHeader().setVisible(False)
         self.tbl_spell_catalog.verticalHeader().setDefaultSectionSize(34)
+        self.tbl_spell_catalog.setIconSize(QSize(48, 26))
         sp_hdr = self.tbl_spell_catalog.horizontalHeader()
         sp_hdr.setSectionsClickable(True)
         sp_hdr.setSortIndicatorShown(True)
         sp_hdr.setSortIndicator(self._spell_sort_col, self._spell_sort_order)
         sp_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         sp_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.tbl_spell_catalog.setColumnWidth(1, 58)
+        sp_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        sp_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.tbl_spell_catalog.setColumnWidth(1, 54)
+        self.tbl_spell_catalog.setColumnWidth(2, 114)
+        self.tbl_spell_catalog.setColumnWidth(3, 64)
         sp_hdr.sectionClicked.connect(self._on_spell_header_clicked)
         self.tbl_spell_catalog.currentCellChanged.connect(self._on_spell_preview)
         self.tbl_spell_catalog.cellDoubleClicked.connect(lambda _r, _c: self._add_selected_spell())
@@ -1483,9 +2031,15 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_box)
         known_box = QGroupBox("Known & Prepared Spells")
         known_layout = QVBoxLayout(known_box)
-        self.tbl_spells = QTableWidget(0, 3)
-        self.tbl_spells.setHorizontalHeaderLabels(["Spell", "Level", "Prepared"])
+        self.tbl_spells = QTableWidget(0, 6)
+        self.tbl_spells.setHorizontalHeaderLabels(["Spell", "Level", "School", "R / C", "Source", "Prepared"])
+        self.tbl_spells.setIconSize(QSize(48, 26))
         self.tbl_spells.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tbl_spells.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_spells.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_spells.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_spells.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_spells.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.tbl_spells.verticalHeader().setVisible(False)
         self.tbl_spells.currentCellChanged.connect(self._on_known_spell_selected)
         known_layout.addWidget(self.tbl_spells)
@@ -1623,8 +2177,9 @@ class MainWindow(QMainWindow):
 
     def _sync_sidebar(self) -> None:
         race_el = self.repo.get(self.state.race_id)
-        class_el = self.repo.get(self.state.class_id)
-        sub = f"Lv {self.state.level} {race_el.name if race_el else ''} {class_el.name if class_el else ''}".strip()
+        cls_summary = class_display_summary(self.state, self.repo)
+        sub_parts = [f"Lv {self.state.level}" if not cls_summary else "", race_el.name if race_el else "", cls_summary]
+        sub = " ".join(p for p in sub_parts if p).strip() or f"Lv {self.state.level}"
         self.lbl_char_name.setText(self.state.name or "New Adventurer")
         self.lbl_char_sub.setText(sub)
         self.lbl_top_name.setText(self.state.name or "New Adventurer")
@@ -1656,9 +2211,20 @@ class MainWindow(QMainWindow):
         if c.spellcasting:
             sc = c.spellcasting
             slots_txt = ", ".join(f"L{k}:{v}" for k, v in sorted(sc.slots.items())) or "Cantrips"
-            self.lbl_rail_spell_title.setText(f"Spellcasting ({sc.ability[:3].upper()})")
+            if sc.pact_slots and sc.slots != sc.pact_slots:
+                pact_txt = ", ".join(f"L{k}:{v}" for k, v in sorted(sc.pact_slots.items()))
+                slots_txt = f"{slots_txt} | Pact {pact_txt}"
+            if len(sc.casters) > 1:
+                ab_lbl = "/".join(ABILITY_ABBR.get(x.ability.lower(), x.ability[:3].upper()) for x in sc.casters)
+                dc_lbl = "/".join(str(x.save_dc) for x in sc.casters)
+                atk_lbl = "/".join(_fmt_mod(x.attack_bonus) for x in sc.casters)
+            else:
+                ab_lbl = sc.ability[:3].upper()
+                dc_lbl = str(sc.save_dc)
+                atk_lbl = _fmt_mod(sc.attack_bonus)
+            self.lbl_rail_spell_title.setText(f"Spellcasting ({ab_lbl})")
             self.lbl_rail_spell_body.setText(
-                f"Save DC: {sc.save_dc}  •  Attack: {_fmt_mod(sc.attack_bonus)}\nSlots: {slots_txt}"
+                f"Save DC: {dc_lbl}  •  Attack: {atk_lbl}\nSlots: {slots_txt}"
             )
             self.spell_rail_card.show()
         else:
@@ -1676,6 +2242,32 @@ class MainWindow(QMainWindow):
         self.tab_race.set_title("Species" if is_55e else "Race")
         self.nav_buttons[1].setText("Species" if is_55e else "Race")
         self.bg_asi_group.setVisible(is_55e)
+        self.rules_55e_group.setVisible(is_55e)
+        self.chk_heroic_inspiration.setChecked(bool(self.state.heroic_inspiration))
+        self.spn_exhaustion.setValue(int(self.state.exhaustion_level))
+        cls_names_lower = {
+            (self.repo.get(cl.class_id).name.lower() if self.repo.get(cl.class_id) else "")
+            for cl in self.state.normalized_classes()
+        }
+        has_cleric = any("cleric" in n for n in cls_names_lower) or bool(self.state.divine_order_55e)
+        has_druid = any("druid" in n for n in cls_names_lower) or bool(self.state.primal_order_55e)
+        self.lbl_divine_order.setVisible(has_cleric)
+        self.cmb_divine_order.setVisible(has_cleric)
+        self._set_combo_by_data(self.cmb_divine_order, self.state.divine_order_55e)
+        self.lbl_primal_order.setVisible(has_druid)
+        self.cmb_primal_order.setVisible(has_druid)
+        self._set_combo_by_data(self.cmb_primal_order, self.state.primal_order_55e)
+        self.lbl_55e_notes.setText(
+            " • ".join(self.computed.ruleset_55e_notes)
+            if self.computed.ruleset_55e_notes
+            else "2024 PHB active: Lv 3 subclass standardization, Weapon Masteries, Origin Feats, Lv 19 Epic Boons, Exhaustion 0–6 (-2/level d20 & DC)."
+        )
+        active_ov = sum(1 for v in self.state.rule_overrides.values() if v)
+        if self.state.allow_extra_spells and not self.state.rule_overrides.get("allow_extra_spells"):
+            active_ov += 1
+        self.btn_rule_overrides.setText(
+            f"⚙ Rule Overrides ({active_ov})…" if active_ov else "⚙ Rule Overrides…"
+        )
 
         bg_el = self.repo.get(self.state.background_id)
         allowed = get_55e_background_abilities(bg_el)
@@ -1722,7 +2314,14 @@ class MainWindow(QMainWindow):
         self.tab_background.sync_selected(self.state.background_id)
 
         race_el = self.repo.get(self.state.race_id)
-        class_el = self.repo.get(self.state.class_id)
+        cls_summary = class_display_summary(self.state, self.repo)
+
+        can_level_up = self.state.level < 20
+        for btn in (self.btn_level_up, self.btn_overview_level_up, self.btn_class_level_up):
+            btn.setEnabled(can_level_up)
+
+        self._sync_hp_panel()
+        self._sync_multiclass_panel()
 
         self.btn_card_race.setText(
             f"1. {'Species' if is_55e else 'Race'}\n\n"
@@ -1730,7 +2329,7 @@ class MainWindow(QMainWindow):
         )
         self.btn_card_class.setText(
             "2. Class\n\n"
-            + (f"✓ Level {self.state.level} {class_el.name}" if class_el else "Not selected — click to choose")
+            + (f"✓ {cls_summary}" if cls_summary else "Not selected — click to choose")
         )
         self.btn_card_bg.setText(
             "3. Background\n\n"
@@ -1754,12 +2353,33 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
 
     def _sync_choices_tab(self) -> None:
+        choices_sig = (
+            self.state.ruleset,
+            self.state.level,
+            self.state.race_id,
+            self.state.class_id,
+            self.state.background_id,
+            tuple((c.class_id, c.level) for c in self.state.normalized_classes()),
+            tuple((k, tuple(v)) for k, v in sorted(self.state.selections.items())),
+            tuple((k, v) for k, v in sorted(self.state.rule_overrides.items()) if v),
+            tuple(
+                (s.key, s.source_element_id, s.rule.type, s.rule.number, s.rule.level, tuple(s.options))
+                for s in self.computed.active_selections
+            ),
+            tuple(sorted(e.id for e in self.computed.granted_elements if e.type not in ("Level", "Grants", "Support"))),
+            len(self.repo.by_id),
+        )
+        if choices_sig == self._choices_sig:
+            return
+        self._choices_sig = choices_sig
+
         self._clear_layout(self.selections_layout)
         self._clear_layout(self.tab_race.choices_layout)
         self._clear_layout(self.tab_class.choices_layout)
         self._clear_layout(self.tab_background.choices_layout)
 
         pending_total = 0
+        active_class_ids = {c.class_id for c in self.state.normalized_classes()}
         for active_sel in self.computed.active_selections:
             chosen = self.state.selections.get(active_sel.key, [])
             filled = sum(1 for i in range(active_sel.rule.number) if i < len(chosen) and chosen[i])
@@ -1771,7 +2391,7 @@ class MainWindow(QMainWindow):
             src_el = self.repo.get(active_sel.source_element_id)
             if active_sel.source_element_id == self.state.race_id or (src_el and src_el.type in ("Race", "Sub Race", "Racial Trait")):
                 self._add_selection_widget(active_sel, filled, self.tab_race.choices_layout)
-            elif active_sel.source_element_id == self.state.class_id or (src_el and src_el.type in ("Class", "Archetype", "Class Feature", "Archetype Feature")):
+            elif active_sel.source_element_id in active_class_ids or (src_el and src_el.type in ("Class", "Archetype", "Class Feature", "Archetype Feature")):
                 self._add_selection_widget(active_sel, filled, self.tab_class.choices_layout)
             elif active_sel.source_element_id == self.state.background_id or (src_el and src_el.type in ("Background", "Background Feature")):
                 self._add_selection_widget(active_sel, filled, self.tab_background.choices_layout)
@@ -1919,6 +2539,7 @@ class MainWindow(QMainWindow):
             self.tbl_skills.setItem(row, 2, prof_it)
             self.tbl_skills.setItem(row, 3, bonus_it)
 
+        self.lst_features.setUpdatesEnabled(False)
         self.lst_features.clear()
         for el in self.computed.granted_elements:
             if el.type in ("Level", "Grants", "Support"):
@@ -1926,16 +2547,20 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"[{el.type}] {el.name}")
             item.setData(Qt.ItemDataRole.UserRole, el.id)
             self.lst_features.addItem(item)
+        self.lst_features.setUpdatesEnabled(True)
+        self._sync_animal_forms_tab()
+        self._sync_companions_tab()
 
     def _max_attuned_items(self) -> int:
-        class_el = self.repo.get(self.state.class_id)
-        if class_el and "artificer" in class_el.name.lower():
-            if self.state.level >= 18:
-                return 6
-            if self.state.level >= 14:
-                return 5
-            if self.state.level >= 10:
-                return 4
+        for cl in self.state.normalized_classes():
+            cel = self.repo.get(cl.class_id)
+            if cel and "artificer" in cel.name.lower():
+                if cl.level >= 18:
+                    return 6
+                if cl.level >= 14:
+                    return 5
+                if cl.level >= 10:
+                    return 4
         return 3
 
     def _on_attunement_rule_toggled(self, checked: int) -> None:
@@ -1962,6 +2587,30 @@ class MainWindow(QMainWindow):
                 if self.config.enforce_attunement
                 else f"Attuned: {cur_att} (Unlimited)"
             )
+
+        is_55e = self.state.ruleset == "5.5e"
+        self.mastery_55e_group.setVisible(is_55e)
+        if is_55e:
+            limit = self.computed.weapon_mastery_limit
+            ov_mastery = self.state.has_override("override_weapon_mastery")
+            self.chk_override_mastery.setChecked(ov_mastery)
+            self.lbl_mastery_limit.setText(
+                f"Masteries: {len(self.state.weapon_masteries)} / {'∞ (Override)' if ov_mastery else limit}"
+            )
+            if self.computed.weapon_mastery_details:
+                self.lbl_mastery_active.setText(
+                    "Active Masteries: "
+                    + ", ".join(f"{d['weapon']} ({d['mastery']})" for d in self.computed.weapon_mastery_details)
+                )
+            elif self.state.weapon_masteries:
+                self.lbl_mastery_active.setText(
+                    "Active Masteries: "
+                    + ", ".join(f"{w} ({get_weapon_mastery(w) or 'Mastery'})" for w in self.state.weapon_masteries)
+                )
+            else:
+                self.lbl_mastery_active.setText(
+                    "Active Masteries: None (select a weapon above and click + Add Mastery)"
+                )
 
         self.tbl_inventory.setRowCount(len(self.state.inventory))
         for row, inv in enumerate(self.state.inventory):
@@ -2054,22 +2703,62 @@ class MainWindow(QMainWindow):
         return cantrips, leveled, combined
 
     def _sync_spells_tab(self) -> None:
-        self.chk_manual_spells.setChecked(self.state.allow_extra_spells)
+        self.chk_manual_spells.setChecked(self.state.has_override("allow_extra_spells"))
         sc = self.computed.spellcasting
         cantrip_cnt, leveled_cnt, combined = self._spell_counts()
+
+        # Populate class/subclass caster filter combo while preserving selection
+        prev_filter = self.cmb_spell_caster.currentData() or "__eligible__"
+        self.cmb_spell_caster.blockSignals(True)
+        self.cmb_spell_caster.clear()
+        if sc and sc.casters:
+            self.cmb_spell_caster.addItem("Eligible Class / Subclass Spells", "__eligible__")
+            for caster in sc.casters:
+                sub_tag = f" ({caster.subclass_name})" if caster.subclass_name else ""
+                self.cmb_spell_caster.addItem(
+                    f"{caster.source_class_name}{sub_tag} List",
+                    f"caster::{caster.source_class_id}",
+                )
+            self.cmb_spell_caster.addItem("All Spells", "__all__")
+            idx = self.cmb_spell_caster.findData(prev_filter)
+            self.cmb_spell_caster.setCurrentIndex(idx if idx >= 0 else 0)
+        else:
+            self.cmb_spell_caster.addItem("All Spells", "__all__")
+            self.cmb_spell_caster.setCurrentIndex(0)
+        self.cmb_spell_caster.blockSignals(False)
+        self._refresh_spell_catalog()
+
         if sc:
             slots_txt = ", ".join(f"L{k}: {v}" for k, v in sorted(sc.slots.items())) or "Cantrips"
-            self.lbl_spellcasting_header.setText(
-                f"{sc.caster_name} ({sc.ability}) | Save DC: {sc.save_dc} | "
-                f"Attack: {_fmt_mod(sc.attack_bonus)} | Slots: {slots_txt}"
-            )
+            if sc.pact_slots and sc.slots != sc.pact_slots:
+                pact_txt = ", ".join(f"L{k}: {v}" for k, v in sorted(sc.pact_slots.items()))
+                slots_txt = f"{slots_txt}  |  Pact Magic: {pact_txt}"
+            if len(sc.casters) > 1:
+                caster_hdrs = " / ".join(
+                    f"{c.source_class_name} ({ABILITY_ABBR.get(c.ability.lower(), c.ability[:3].upper())} DC {c.save_dc}, {_fmt_mod(c.attack_bonus)})"
+                    for c in sc.casters
+                )
+                mc_tag = f" [MC Caster Lv {sc.multiclass_caster_level}]" if sc.multiclass_caster_level else ""
+                self.lbl_spellcasting_header.setText(
+                    f"{caster_hdrs}{mc_tag}  |  Slots: {slots_txt}"
+                )
+            else:
+                self.lbl_spellcasting_header.setText(
+                    f"{sc.caster_name} ({sc.ability}) | Save DC: {sc.save_dc} | "
+                    f"Attack: {_fmt_mod(sc.attack_bonus)} | Slots: {slots_txt}"
+                )
+
+            always_prep_set = set(sc.always_prepared_spell_ids)
             parts = [f"Cantrips: {cantrip_cnt} / {sc.max_cantrips}"]
             if sc.max_known_spells is not None:
                 parts.append(f"Spells Known/Book: {leveled_cnt} / {sc.max_known_spells}")
             else:
                 parts.append(f"Spells Added: {leveled_cnt} (All class spells available)")
             if sc.max_prepared_spells is not None:
-                parts.append(f"Prepared: {len(self.state.prepared_spells)} / {sc.max_prepared_spells}")
+                manual_prep_cnt = sum(
+                    1 for sid in self.state.prepared_spells if sid not in always_prep_set
+                )
+                parts.append(f"Prepared: {manual_prep_cnt} / {sc.max_prepared_spells}")
             parts.append(f"Max Slot Level: {sc.max_spell_level}")
             if self.state.allow_extra_spells:
                 parts.append("[Manual Override Active]")
@@ -2087,31 +2776,72 @@ class MainWindow(QMainWindow):
                     "Select a spellcasting class or enable 'Allow manual extra spells' to add spells."
                 )
 
+        self.tbl_spells.setUpdatesEnabled(False)
         self.tbl_spells.setRowCount(len(combined))
         prepared_set = set(self.state.prepared_spells)
         granted_set = set(sc.granted_spell_ids if sc else [])
+        always_prep_set = set(sc.always_prepared_spell_ids if sc else [])
+
         for row, sid in enumerate(combined):
             el = self.repo.get(sid)
-            suffix = " [Class]" if sid in granted_set and sid not in self.state.known_spells else ""
-            name_item = QTableWidgetItem(f"{el.name if el else sid}{suffix}")
+            name_item = QTableWidgetItem(el.name if el else sid)
             name_item.setData(Qt.ItemDataRole.UserRole, sid)
-            lvl = el.setters.get("level", "0") if el else "?"
+            lvl = str(el.setters.get("level", "0")) if el else "?"
+            lvl_item = QTableWidgetItem(_spell_level_icon(lvl), "Cantrip" if lvl == "0" else f"Lv {lvl}")
+            school = spell_school(el) if el else ""
+            school_item = QTableWidgetItem(
+                _spell_school_icon(school), school.title() if school else "—"
+            )
+            is_rit = is_spell_ritual(el) if el else False
+            is_conc = is_spell_concentration(el) if el else False
+            tags_txt = "/".join(p for p in ("R" if is_rit else "", "C" if is_conc else "") if p)
+            tags_item = QTableWidgetItem(_spell_tags_icon(is_rit, is_conc), tags_txt)
+            tags_item.setToolTip(
+                ", ".join(p for p in ("Ritual" if is_rit else "", "Concentration" if is_conc else "") if p)
+                or "Standard"
+            )
             self.tbl_spells.setItem(row, 0, name_item)
-            self.tbl_spells.setItem(row, 1, QTableWidgetItem(lvl))
+            self.tbl_spells.setItem(row, 1, lvl_item)
+            self.tbl_spells.setItem(row, 2, school_item)
+            self.tbl_spells.setItem(row, 3, tags_item)
+
+            src_cid = self.state.spell_sources.get(sid, "")
+            src_el = self.repo.get(src_cid) if src_cid else None
+            if sid in always_prep_set:
+                src_label = "Subclass [Always Prepared]"
+            elif src_el is not None:
+                src_label = src_el.name
+            elif sid in granted_set and sid not in self.state.known_spells:
+                src_label = "Class / Feature"
+            elif sc and len(sc.casters) == 1:
+                src_label = sc.casters[0].source_class_name
+            else:
+                src_label = "Manual"
+            self.tbl_spells.setItem(row, 4, QTableWidgetItem(src_label))
 
             chk = QCheckBox()
-            chk.setChecked(sid in prepared_set)
+            if sid in always_prep_set:
+                chk.setChecked(True)
+                chk.setEnabled(False)
+                chk.setToolTip("Always prepared by subclass feature (does not count against prepared limit)")
+            else:
+                chk.setChecked(sid in prepared_set)
 
             def make_prep_handler(spell_id: str, chk_ref: QCheckBox):
                 def _on_prep(checked: int) -> None:
                     if self._updating:
                         return
                     if checked:
+                        sc_now = self.computed.spellcasting
+                        ap_set = set(sc_now.always_prepared_spell_ids if sc_now else [])
+                        manual_prep_cnt = sum(
+                            1 for s in self.state.prepared_spells if s not in ap_set
+                        )
                         if (
-                            not self.state.allow_extra_spells
-                            and self.computed.spellcasting
-                            and self.computed.spellcasting.max_prepared_spells is not None
-                            and len(self.state.prepared_spells) >= self.computed.spellcasting.max_prepared_spells
+                            not self.state.has_override("allow_extra_spells")
+                            and sc_now
+                            and sc_now.max_prepared_spells is not None
+                            and manual_prep_cnt >= sc_now.max_prepared_spells
                             and spell_id not in self.state.prepared_spells
                         ):
                             self._updating = True
@@ -2120,7 +2850,7 @@ class MainWindow(QMainWindow):
                             QMessageBox.information(
                                 self,
                                 "Prepared Spell Limit Reached",
-                                f"You can prepare up to {self.computed.spellcasting.max_prepared_spells} spells. "
+                                f"You can prepare up to {sc_now.max_prepared_spells} spells. "
                                 "Enable 'Allow manual extra spells' to override.",
                             )
                             return
@@ -2134,8 +2864,10 @@ class MainWindow(QMainWindow):
 
                 return _on_prep
 
-            chk.stateChanged.connect(make_prep_handler(sid, chk))
-            self.tbl_spells.setCellWidget(row, 2, chk)
+            if sid not in always_prep_set:
+                chk.stateChanged.connect(make_prep_handler(sid, chk))
+            self.tbl_spells.setCellWidget(row, 5, chk)
+        self.tbl_spells.setUpdatesEnabled(True)
 
     def _sync_notes_tab(self) -> None:
         pix = pixmap_from_portrait(self.state.portrait_base64, self.state.portrait_path, size=110)
@@ -2176,7 +2908,22 @@ class MainWindow(QMainWindow):
         self._recalculate_and_refresh()
 
     def select_class_by_id(self, class_id: str) -> None:
-        self.state.class_id = class_id
+        if not class_id:
+            self.state.classes = []
+            self.state.class_id = ""
+            self.state.level_order = []
+        else:
+            norm = self.state.normalized_classes()
+            if not norm:
+                self.state.classes = [ClassLevel(class_id, max(1, min(20, int(self.state.level or 1))))]
+                self.state.level_order = [class_id] * self.state.classes[0].level
+            else:
+                old_primary = norm[0].class_id
+                norm = [cl for cl in norm if cl.class_id != class_id or cl.class_id == old_primary]
+                norm[0] = ClassLevel(class_id, norm[0].level)
+                self.state.classes = norm
+                self.state.level_order = [class_id if c == old_primary else c for c in self.state.level_order]
+            self.state.sync_from_classes()
         self._mark_dirty()
         self._recalculate_and_refresh()
 
@@ -2195,8 +2942,15 @@ class MainWindow(QMainWindow):
         if self._updating:
             return
         self.state.name = text
+        self.lbl_char_name.setText(text or "New Adventurer")
+        self.lbl_top_name.setText(text or "New Adventurer")
+        self.title_bar.set_breadcrumb(text or "New Adventurer")
+        self._updating = True
+        try:
+            self.txt_name.setText(text)
+        finally:
+            self._updating = False
         self._mark_dirty()
-        self._recalculate_and_refresh()
 
     def _on_ruleset_changed(self) -> None:
         if self._updating:
@@ -2205,15 +2959,327 @@ class MainWindow(QMainWindow):
         if self.state.ruleset == "5.5e" and self.state.background_id and not self.state.background_asi:
             allowed = get_55e_background_abilities(self.repo.get(self.state.background_id))
             self.state.background_asi = {allowed[0]: 2, allowed[1]: 1}
+        self._choices_sig = None
         self._mark_dirty()
         self._recalculate_and_refresh()
+
+    def open_rule_overrides_dialog(self) -> None:
+        dlg = RuleOverridesDialog(self.state, self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            overrides = dlg.selected_overrides()
+            self.state.rule_overrides = {k: bool(v) for k, v in overrides.items() if v}
+            self.state.allow_extra_spells = bool(overrides.get("allow_extra_spells", False))
+            self._choices_sig = None
+            self._mark_dirty()
+            self._recalculate_and_refresh()
+
+    def _on_55e_controls_changed(self) -> None:
+        if self._updating:
+            return
+        self.state.heroic_inspiration = self.chk_heroic_inspiration.isChecked()
+        self.state.exhaustion_level = self.spn_exhaustion.value()
+        self.state.divine_order_55e = self.cmb_divine_order.currentData() or ""
+        self.state.primal_order_55e = self.cmb_primal_order.currentData() or ""
+        self._choices_sig = None
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _on_mastery_override_toggled(self, checked: int) -> None:
+        if self._updating:
+            return
+        self.state.set_override("override_weapon_mastery", bool(checked))
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _add_weapon_mastery(self) -> None:
+        wname = self.cmb_mastery_weapon.currentData()
+        if not wname:
+            return
+        cur = list(self.state.weapon_masteries)
+        if any(w.lower() == wname.lower() for w in cur):
+            return
+        limit = self.computed.weapon_mastery_limit
+        if not self.state.has_override("override_weapon_mastery") and len(cur) >= limit:
+            QMessageBox.information(
+                self,
+                "Weapon Mastery Limit Reached",
+                f"Your current classes grant {limit} Weapon Mastery slot(s).\n"
+                "Enable 'Override mastery limit' to add more.",
+            )
+            return
+        cur.append(wname)
+        self.state.weapon_masteries = cur
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _remove_weapon_mastery(self) -> None:
+        wname = self.cmb_mastery_weapon.currentData()
+        cur = [w for w in self.state.weapon_masteries if w.lower() != (wname or "").lower()]
+        if len(cur) == len(self.state.weapon_masteries) and self.state.weapon_masteries:
+            cur = self.state.weapon_masteries[:-1]
+        if cur != self.state.weapon_masteries:
+            self.state.weapon_masteries = cur
+            self._mark_dirty()
+            self._recalculate_and_refresh()
 
     def _on_level_changed(self) -> None:
         if self._updating:
             return
-        self.state.level = self.spn_level.value()
+        new_val = max(1, min(20, self.spn_level.value()))
+        norm = self.state.normalized_classes()
+        if not norm:
+            self.state.level = new_val
+        elif len(norm) == 1:
+            norm[0].level = new_val
+            self.state.classes = norm
+            self.state.sync_from_classes()
+        else:
+            other_sum = sum(c.level for c in norm[1:])
+            prim_lvl = max(1, new_val - other_sum)
+            norm[0].level = prim_lvl
+            self.state.classes = norm
+            self.state.sync_from_classes()
         self._mark_dirty()
         self._recalculate_and_refresh()
+
+    def _sync_hp_panel(self) -> None:
+        if not hasattr(self, "cmb_hp_mode"):
+            return
+        self._set_combo_by_data(self.cmb_hp_mode, self.state.hp_mode or "average")
+        is_rolled = self.state.hp_mode == "rolled"
+        self.btn_roll_all_hp.setVisible(is_rolled)
+        self.btn_reset_avg_hp.setVisible(is_rolled)
+        self.tbl_hp_rolls.setVisible(is_rolled)
+
+        con_mod = self.computed.ability_modifiers["constitution"]
+        rows = self.computed.hp_breakdown
+        mode_tag = "Rolled / Manual" if is_rolled else "Average (Fixed)"
+        self.lbl_hp_formula.setText(
+            f"Max HP: {self.computed.max_hp} ({mode_tag} • Hit Dice: {self.computed.hit_dice_summary or self.computed.hit_die} • CON {_fmt_mod(con_mod)})"
+        )
+
+        if not is_rolled:
+            return
+
+        self.tbl_hp_rolls.setRowCount(len(rows))
+        for r, row_data in enumerate(rows):
+            lvl_i = int(row_data["level"])
+            hd_num = int(row_data["hd_num"])
+            die_val = int(row_data["roll"])
+            self.tbl_hp_rolls.setItem(r, 0, QTableWidgetItem(str(lvl_i)))
+            self.tbl_hp_rolls.setItem(r, 1, QTableWidgetItem(str(row_data["class_name"])))
+            self.tbl_hp_rolls.setItem(r, 2, QTableWidgetItem(str(row_data["hit_die"])))
+
+            cell_w = QWidget()
+            cl = QHBoxLayout(cell_w)
+            cl.setContentsMargins(2, 1, 2, 1)
+            cl.setSpacing(4)
+            spn = QSpinBox()
+            spn.setRange(1, hd_num)
+            spn.setValue(die_val)
+            spn.setFixedWidth(52)
+            btn_r = QPushButton(f"d{hd_num}")
+            btn_r.setObjectName("CompactCardBtn")
+            btn_r.setToolTip(f"Roll 1d{hd_num} for Level {lvl_i}")
+
+            def make_roll_spin_handler(level_num: int):
+                def _on_val(val: int) -> None:
+                    if self._updating:
+                        return
+                    self.state.hp_rolls[level_num] = val
+                    self._mark_dirty()
+                    self._recalculate_and_refresh()
+
+                return _on_val
+
+            def make_roll_btn_handler(level_num: int, die_sides: int):
+                def _on_click() -> None:
+                    self.state.hp_rolls[level_num] = random.randint(1, die_sides)
+                    self._mark_dirty()
+                    self._recalculate_and_refresh()
+
+                return _on_click
+
+            spn.valueChanged.connect(make_roll_spin_handler(lvl_i))
+            btn_r.clicked.connect(make_roll_btn_handler(lvl_i, hd_num))
+            cl.addWidget(spn)
+            cl.addWidget(btn_r)
+            self.tbl_hp_rolls.setCellWidget(r, 3, cell_w)
+            self.tbl_hp_rolls.setRowHeight(r, 30)
+
+            self.tbl_hp_rolls.setItem(r, 4, QTableWidgetItem(_fmt_mod(int(row_data["con_mod"]))))
+            self.tbl_hp_rolls.setItem(r, 5, QTableWidgetItem(str(row_data["total"])))
+
+    def _on_hp_mode_changed(self) -> None:
+        if self._updating:
+            return
+        mode = self.cmb_hp_mode.currentData() or "average"
+        self.state.hp_mode = mode
+        if mode == "rolled":
+            for row_data in self.computed.hp_breakdown:
+                lvl_i = int(row_data["level"])
+                if lvl_i not in self.state.hp_rolls:
+                    self.state.hp_rolls[lvl_i] = int(row_data["roll"])
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _roll_all_hp(self) -> None:
+        self.state.hp_mode = "rolled"
+        for row_data in self.computed.hp_breakdown:
+            lvl_i = int(row_data["level"])
+            hd_num = int(row_data["hd_num"])
+            self.state.hp_rolls[lvl_i] = hd_num if lvl_i == 1 else random.randint(1, hd_num)
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _reset_average_hp(self) -> None:
+        self.state.hp_mode = "average"
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def _sync_multiclass_panel(self) -> None:
+        if not hasattr(self, "multiclass_rows_layout"):
+            return
+        self._clear_layout(self.multiclass_rows_layout)
+        norm = self.state.normalized_classes()
+        active_ids = {c.class_id for c in norm}
+        total_lvl = sum(c.level for c in norm)
+
+        if not norm:
+            lbl = QLabel("Select a primary class below first, then add multiclasses here.")
+            lbl.setObjectName("MutedText")
+            self.multiclass_rows_layout.addWidget(lbl)
+        else:
+            for idx, cl in enumerate(norm):
+                cel = self.repo.get(cl.class_id)
+                cname = cel.name if cel else cl.class_id
+                hd = cel.setters.get("hd", "d8") if cel else "d8"
+                row_w = QWidget()
+                rl = QHBoxLayout(row_w)
+                rl.setContentsMargins(0, 0, 0, 0)
+                rl.setSpacing(6)
+                tag = " [Primary]" if idx == 0 else " [Multiclass]"
+                lbl = QLabel(f"<b>{cname}</b> <span style='color:#94a3b8;'>({hd}){tag}</span>")
+                rl.addWidget(lbl, 1)
+
+                btn_m = QPushButton("-")
+                btn_m.setObjectName("StepperBtn")
+                btn_m.setEnabled(cl.level > 1)
+                spn = QSpinBox()
+                spn.setObjectName("StepperSpin")
+                spn.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+                spn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                spn.setFixedWidth(44)
+                spn.setRange(1, max(1, 20 - (total_lvl - cl.level)))
+                spn.setValue(cl.level)
+                btn_p = QPushButton("+")
+                btn_p.setObjectName("StepperBtn")
+                btn_p.setEnabled(total_lvl < 20)
+
+                def make_mc_lvl(cid: str):
+                    def _chg(val: int) -> None:
+                        if self._updating:
+                            return
+                        self.set_class_level(cid, val)
+
+                    return _chg
+
+                btn_m.clicked.connect(lambda _=False, cid=cl.class_id, lv=cl.level: self.set_class_level(cid, max(1, lv - 1)))
+                btn_p.clicked.connect(lambda _=False, cid=cl.class_id, lv=cl.level: self.set_class_level(cid, lv + 1))
+                spn.valueChanged.connect(make_mc_lvl(cl.class_id))
+                rl.addWidget(btn_m)
+                rl.addWidget(spn)
+                rl.addWidget(btn_p)
+
+                if idx > 0:
+                    btn_rem = QPushButton("Remove")
+                    btn_rem.setObjectName("DangerBtn")
+                    btn_rem.clicked.connect(lambda _=False, cid=cl.class_id: self.remove_multiclass(cid))
+                    rl.addWidget(btn_rem)
+                self.multiclass_rows_layout.addWidget(row_w)
+
+        self.cmb_add_multiclass.blockSignals(True)
+        self.cmb_add_multiclass.clear()
+        for cel in self.repo.of_type("Class"):
+            if cel.id not in active_ids:
+                self.cmb_add_multiclass.addItem(cel.name, cel.id)
+        self.cmb_add_multiclass.blockSignals(False)
+        can_add = bool(norm) and total_lvl < 20 and self.cmb_add_multiclass.count() > 0
+        self.cmb_add_multiclass.setEnabled(can_add)
+        self.btn_add_multiclass.setEnabled(can_add)
+
+    def _on_add_multiclass_clicked(self) -> None:
+        cid = self.cmb_add_multiclass.currentData() or ""
+        if not cid:
+            return
+        cel = self.repo.get(cid)
+        if cel is not None and self.state.normalized_classes():
+            ok, msg = check_multiclass_prerequisites(self.state, self.computed, cel, self.repo)
+            if not ok:
+                reply = QMessageBox.warning(
+                    self,
+                    "Multiclass Prerequisites Not Met",
+                    f"{msg}.\n\nAdd {cel.name} anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+        self.add_multiclass(cid, 1)
+
+    def add_multiclass(self, class_id: str, level: int = 1) -> None:
+        if not class_id:
+            return
+        norm = self.state.normalized_classes()
+        total = sum(c.level for c in norm)
+        avail = max(0, 20 - total)
+        if avail <= 0:
+            return
+        add_lvl = min(max(1, level), avail)
+        for cl in norm:
+            if cl.class_id == class_id:
+                cl.level += add_lvl
+                break
+        else:
+            norm.append(ClassLevel(class_id, add_lvl))
+        self.state.classes = norm
+        if not self.state.level_order:
+            self.state.level_order = self.state.normalized_level_order()
+        self.state.level_order.extend([class_id] * add_lvl)
+        self.state.sync_from_classes()
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def remove_multiclass(self, class_id: str) -> None:
+        norm = [cl for cl in self.state.normalized_classes() if cl.class_id != class_id]
+        self.state.classes = norm
+        self.state.level_order = [cid for cid in self.state.level_order if cid != class_id]
+        self.state.sync_from_classes()
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def set_class_level(self, class_id: str, level: int) -> None:
+        norm = self.state.normalized_classes()
+        other_sum = sum(c.level for c in norm if c.class_id != class_id)
+        target_lvl = max(1, min(max(1, 20 - other_sum), int(level)))
+        for cl in norm:
+            if cl.class_id == class_id:
+                cl.level = target_lvl
+                break
+        self.state.classes = norm
+        self.state.sync_from_classes()
+        self._mark_dirty()
+        self._recalculate_and_refresh()
+
+    def open_level_up_wizard(self) -> None:
+        if self.state.level >= 20 and self.state.normalized_classes():
+            QMessageBox.information(self, "Max Level Reached", "Character is already at Level 20.")
+            return
+        dlg = LevelUpWizardDialog(self.state, self.repo, self.engine, parent=self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            self.state = dlg.result_state()
+            self._mark_dirty()
+            self._recalculate_and_refresh()
 
     def _on_xp_changed(self, val: int) -> None:
         if self._updating:
@@ -2459,25 +3525,39 @@ class MainWindow(QMainWindow):
         else:
             results.sort(key=lambda e: e.name.lower(), reverse=reverse)
 
+        self.tbl_equip_catalog.setUpdatesEnabled(False)
         shown = results[:300]
-        self.tbl_equip_catalog.setRowCount(len(shown))
-        for row, el in enumerate(shown):
-            self.tbl_equip_catalog.setCellWidget(row, 0, self._make_equip_type_badge(el.type))
-            name_item = QTableWidgetItem(el.name)
-            name_item.setData(Qt.ItemDataRole.UserRole, el.id)
-            self.tbl_equip_catalog.setItem(row, 1, name_item)
-            self.tbl_equip_catalog.setCellWidget(row, 2, self._make_equip_rarity_badge(el))
+        equip_sig = tuple((e.id, self._equip_sort_col, int(self._equip_sort_order.value)) for e in shown)
+        if equip_sig != self._equip_catalog_sig:
+            self._equip_catalog_sig = equip_sig
+            self.tbl_equip_catalog.setRowCount(len(shown))
+            for row, el in enumerate(shown):
+                type_item = QTableWidgetItem(_equip_type_icon(el.type), "")
+                type_item.setToolTip(el.type)
+                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.tbl_equip_catalog.setItem(row, 0, type_item)
 
-            w = parse_weight_lb(el)
-            w_item = QTableWidgetItem(f"{w:.1f} lb" if w > 0 else "—")
-            w_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.tbl_equip_catalog.setItem(row, 3, w_item)
+                name_item = QTableWidgetItem(el.name)
+                name_item.setData(Qt.ItemDataRole.UserRole, el.id)
+                self.tbl_equip_catalog.setItem(row, 1, name_item)
 
-            cost = el.setters.get("cost", "")
-            cur = el.setters.get("currency", "")
-            c_item = QTableWidgetItem(f"{cost} {cur}".strip() if cost else "—")
-            c_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.tbl_equip_catalog.setItem(row, 4, c_item)
+                _rank, r_letter, r_label, r_fg, r_bg = _item_rarity_info(el)
+                r_item = QTableWidgetItem(_equip_rarity_icon(r_letter, r_fg, r_bg), "")
+                r_item.setToolTip(r_label)
+                r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.tbl_equip_catalog.setItem(row, 2, r_item)
+
+                w = parse_weight_lb(el)
+                w_item = QTableWidgetItem(f"{w:.1f} lb" if w > 0 else "—")
+                w_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.tbl_equip_catalog.setItem(row, 3, w_item)
+
+                cost = el.setters.get("cost", "")
+                cur = el.setters.get("currency", "")
+                c_item = QTableWidgetItem(f"{cost} {cur}".strip() if cost else "—")
+                c_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.tbl_equip_catalog.setItem(row, 4, c_item)
+        self.tbl_equip_catalog.setUpdatesEnabled(True)
 
     def _open_magic_gear_dialog(self) -> None:
         initial_el: Optional[Element] = None
@@ -2573,30 +3653,37 @@ class MainWindow(QMainWindow):
     def _refresh_spell_catalog(self) -> None:
         query = self.txt_spell_search.text()
         lvl_filter = self.cmb_spell_level.currentData() or ""
+        class_filter = self.cmb_spell_class.currentData() or "" if hasattr(self, "cmb_spell_class") else ""
         school_filter = self.cmb_spell_school.currentData() or "" if hasattr(self, "cmb_spell_school") else ""
         prop_filter = self.cmb_spell_prop.currentData() or "" if hasattr(self, "cmb_spell_prop") else ""
+        caster_filter = self.cmb_spell_caster.currentData() if hasattr(self, "cmb_spell_caster") else "__all__"
         spells = self.repo.search(query, ["Spell"])
+
+        sc = self.computed.spellcasting
+        if sc and sc.casters and caster_filter and caster_filter != "__all__":
+            if caster_filter == "__eligible__":
+                spells = [
+                    el
+                    for el in spells
+                    if any(is_spell_eligible_for_caster(el, c) for c in sc.casters)
+                ]
+            elif caster_filter.startswith("caster::"):
+                target_cid = caster_filter.split("::", 1)[1]
+                target_c = next((c for c in sc.casters if c.source_class_id == target_cid), None)
+                if target_c is not None:
+                    spells = [el for el in spells if is_spell_eligible_for_caster(el, target_c)]
+
+        if class_filter:
+            cf_lower = class_filter.lower()
+            spells = [el for el in spells if any(c.lower() == cf_lower for c in spell_classes(el))]
         if lvl_filter:
             spells = [el for el in spells if str(el.setters.get("level", "0")) == lvl_filter]
         if school_filter:
-            spells = [
-                el for el in spells
-                if el.setters.get("school", "").strip().lower() == school_filter
-                or school_filter in " ".join(el.supports).lower()
-            ]
+            spells = [el for el in spells if spell_school(el).lower() == school_filter]
         if prop_filter == "ritual":
-            spells = [
-                el for el in spells
-                if el.setters.get("isRitual", "").strip().lower() == "true"
-                or "ritual" in " ".join(el.supports).lower()
-            ]
+            spells = [el for el in spells if is_spell_ritual(el)]
         elif prop_filter == "concentration":
-            spells = [
-                el for el in spells
-                if el.setters.get("isConcentration", "").strip().lower() == "true"
-                or "concentration" in el.setters.get("duration", "").lower()
-                or "concentration" in " ".join(el.supports).lower()
-            ]
+            spells = [el for el in spells if is_spell_concentration(el)]
 
         def _spell_lvl_num(el: Element) -> int:
             raw = str(el.setters.get("level", "0")).strip()
@@ -2605,17 +3692,52 @@ class MainWindow(QMainWindow):
         reverse = self._spell_sort_order == Qt.SortOrder.DescendingOrder
         if self._spell_sort_col == 1:
             spells.sort(key=lambda e: (_spell_lvl_num(e), e.name.lower()), reverse=reverse)
+        elif self._spell_sort_col == 2:
+            spells.sort(key=lambda e: (spell_school(e), e.name.lower()), reverse=reverse)
+        elif self._spell_sort_col == 3:
+            spells.sort(
+                key=lambda e: (
+                    (2 if is_spell_ritual(e) else 0) + (1 if is_spell_concentration(e) else 0),
+                    e.name.lower(),
+                ),
+                reverse=reverse,
+            )
         else:
             spells.sort(key=lambda e: (e.name.lower(), _spell_lvl_num(e)), reverse=reverse)
 
         shown = spells[:350]
+        spell_sig = tuple((e.id, self._spell_sort_col, int(self._spell_sort_order.value)) for e in shown)
+        if spell_sig == self._spell_catalog_sig:
+            return
+        self._spell_catalog_sig = spell_sig
+
+        self.tbl_spell_catalog.setUpdatesEnabled(False)
         self.tbl_spell_catalog.setRowCount(len(shown))
         for row, el in enumerate(shown):
             lvl = str(el.setters.get("level", "0"))
             name_item = QTableWidgetItem(el.name)
             name_item.setData(Qt.ItemDataRole.UserRole, el.id)
             self.tbl_spell_catalog.setItem(row, 0, name_item)
-            self.tbl_spell_catalog.setCellWidget(row, 1, self._make_spell_level_badge(lvl))
+
+            lvl_item = QTableWidgetItem(_spell_level_icon(lvl), "")
+            lvl_item.setToolTip("Cantrip" if lvl == "0" else f"Level {lvl}")
+            lvl_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.tbl_spell_catalog.setItem(row, 1, lvl_item)
+
+            school = spell_school(el)
+            school_label = school.title() if school else "—"
+            school_item = QTableWidgetItem(_spell_school_icon(school), school_label)
+            school_item.setToolTip(f"School: {school_label}")
+            self.tbl_spell_catalog.setItem(row, 2, school_item)
+
+            is_rit = is_spell_ritual(el)
+            is_conc = is_spell_concentration(el)
+            tag_item = QTableWidgetItem(_spell_tags_icon(is_rit, is_conc), "")
+            tag_tips = [p for p in ("Ritual" if is_rit else "", "Concentration" if is_conc else "") if p]
+            tag_item.setToolTip(", ".join(tag_tips) if tag_tips else "Standard")
+            tag_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.tbl_spell_catalog.setItem(row, 3, tag_item)
+        self.tbl_spell_catalog.setUpdatesEnabled(True)
 
     def _on_spell_preview(
         self, row: int, _col: int, _prev_row: int = -1, _prev_col: int = -1
@@ -2640,7 +3762,7 @@ class MainWindow(QMainWindow):
     def _on_manual_spells_toggled(self, checked: int) -> None:
         if self._updating:
             return
-        self.state.allow_extra_spells = bool(checked)
+        self.state.set_override("allow_extra_spells", bool(checked))
         self._mark_dirty()
         self._recalculate_and_refresh()
 
@@ -2668,11 +3790,32 @@ class MainWindow(QMainWindow):
             el = self.repo.get(sid)
             lvl_str = el.setters.get("level", "0") if el else "0"
             lvl = int(lvl_str) if lvl_str.isdigit() else 0
-            if lvl > sc.max_spell_level:
+
+            # Resolve target caster (selected caster filter or any eligible caster)
+            caster_filter = self.cmb_spell_caster.currentData() if hasattr(self, "cmb_spell_caster") else "__eligible__"
+            target_caster: Optional[ClassSpellcasting] = None
+            if caster_filter and str(caster_filter).startswith("caster::"):
+                tcid = str(caster_filter).split("::", 1)[1]
+                target_caster = next((c for c in sc.casters if c.source_class_id == tcid), None)
+            if target_caster is None and el is not None:
+                eligible = [c for c in sc.casters if is_spell_eligible_for_caster(el, c)]
+                if sc.casters and not eligible:
+                    QMessageBox.information(
+                        self,
+                        "Spell Not on Class List",
+                        f"{el.name} is not on your active class or subclass spell list(s). "
+                        "Enable 'Allow manual extra spells' to override.",
+                    )
+                    return
+                target_caster = max(eligible, key=lambda c: c.max_spell_level) if eligible else (sc.casters[0] if sc.casters else None)
+
+            max_lvl_allowed = target_caster.max_spell_level if target_caster else sc.max_spell_level
+            if lvl > max_lvl_allowed:
                 QMessageBox.information(
                     self,
                     "Spell Level Too High",
-                    f"{el.name if el else sid} is level {lvl}, but your max spell slot level is {sc.max_spell_level}. "
+                    f"{el.name if el else sid} is level {lvl}, but your max spell level for "
+                    f"{target_caster.source_class_name if target_caster else sc.caster_name} is {max_lvl_allowed}. "
                     "Enable 'Allow manual extra spells' to override.",
                 )
                 return
@@ -2692,6 +3835,8 @@ class MainWindow(QMainWindow):
                     "Enable 'Allow manual extra spells' to override.",
                 )
                 return
+            if target_caster is not None and target_caster.source_class_id:
+                self.state.spell_sources[sid] = target_caster.source_class_id
 
         self.state.known_spells.append(sid)
         self._mark_dirty()
@@ -2708,12 +3853,372 @@ class MainWindow(QMainWindow):
                 self.state.known_spells.remove(sid)
             if sid in self.state.prepared_spells:
                 self.state.prepared_spells.remove(sid)
+            self.state.spell_sources.pop(sid, None)
             # Also clear from any Spell <select> choice if it came from a class feature
             for skey, chosen in list(self.state.selections.items()):
                 if sid in chosen:
                     self.state.selections[skey] = ["" if c == sid else c for c in chosen]
             self._mark_dirty()
             self._recalculate_and_refresh()
+
+    # ------------------------------------------------------------------
+    # Animal Forms / Wild Shape & Companions
+    # ------------------------------------------------------------------
+    def _custom_animal_form_ids(self) -> set[str]:
+        return {
+            str(d.get("id") or "").strip()
+            for d in self.state.custom_animal_forms
+            if isinstance(d, dict) and str(d.get("id") or "").strip()
+        }
+
+    def _sync_animal_forms_tab(self) -> None:
+        access = compute_animal_form_access(self.state, self.computed, self.repo)
+        ov_all = self.state.has_override("allow_all_animal_forms")
+        self.chk_override_animal_forms.setChecked(ov_all)
+        known_names = [
+            (f.name if (f := find_animal_form(fid, self.state)) is not None else fid)
+            for fid in self.state.animal_forms
+        ]
+        active_form = (
+            find_animal_form(self.state.active_animal_form_id, self.state)
+            if self.state.active_animal_form_id
+            else None
+        )
+        active_name = active_form.name if active_form is not None else ""
+        summary = access.source_summary
+        if active_name:
+            summary += f"  •  ACTIVE FORM: {active_name}"
+        self.lbl_animal_access.setText(summary)
+        known_txt = ", ".join(known_names) if known_names else "None"
+        if access.known_forms_limit is not None:
+            self.lbl_known_animal_forms.setText(
+                f"Known / Saved Forms ({len(known_names)} / {access.known_forms_limit}): {known_txt}"
+            )
+        else:
+            self.lbl_known_animal_forms.setText(f"Known / Saved Forms: {known_txt}")
+        self._refresh_animal_forms_table()
+
+    def _refresh_animal_forms_table(self) -> None:
+        access = compute_animal_form_access(self.state, self.computed, self.repo)
+        ov_all = self.state.has_override("allow_all_animal_forms")
+        query = self.txt_animal_search.text().strip().lower()
+        mode = self.cmb_animal_cr.currentData() or "eligible"
+        custom_ids = self._custom_animal_form_ids()
+        known_set = set(self.state.animal_forms)
+        rows = []
+        for form in all_animal_forms(self.state):
+            is_custom = form.id in custom_ids
+            if is_custom:
+                eligible, reason = True, "Custom Animal Form"
+            else:
+                eligible, reason = is_form_eligible(form, access, override_all=ov_all)
+            if mode == "eligible" and not eligible and not is_custom and form.id not in known_set:
+                continue
+            if (
+                query
+                and query not in form.name.lower()
+                and query not in form.category.lower()
+                and query not in form.creature_type.lower()
+            ):
+                continue
+            rows.append((form, eligible, reason, is_custom))
+
+        self.tbl_animal_forms.setUpdatesEnabled(False)
+        self.tbl_animal_forms.setRowCount(len(rows))
+        for r, (form, eligible, reason, is_custom) in enumerate(rows):
+            n_it = QTableWidgetItem(form.name)
+            n_it.setData(Qt.ItemDataRole.UserRole, form.id)
+            n_it.setToolTip(reason)
+            c_it = QTableWidgetItem(form.cr_label)
+            c_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            s_it = QTableWidgetItem(form.speed)
+            status_parts = []
+            if form.id == self.state.active_animal_form_id:
+                status_parts.append("ACTIVE")
+            if is_custom:
+                status_parts.append("Custom")
+            if form.id in known_set:
+                status_parts.append("Known")
+            elif eligible and not is_custom:
+                status_parts.append("Eligible")
+            elif not is_custom:
+                status_parts.append("Locked")
+            st_it = QTableWidgetItem(" • ".join(status_parts))
+            st_it.setToolTip(reason)
+            self.tbl_animal_forms.setItem(r, 0, n_it)
+            self.tbl_animal_forms.setItem(r, 1, c_it)
+            self.tbl_animal_forms.setItem(r, 2, s_it)
+            self.tbl_animal_forms.setItem(r, 3, st_it)
+        self.tbl_animal_forms.setUpdatesEnabled(True)
+        if rows and self.tbl_animal_forms.currentRow() < 0:
+            self.tbl_animal_forms.selectRow(0)
+
+    def _on_animal_override_toggled(self, checked: int) -> None:
+        if self._updating:
+            return
+        self.state.set_override("allow_all_animal_forms", bool(checked))
+        self._mark_dirty()
+        self._sync_animal_forms_tab()
+
+    def _selected_animal_form_id(self) -> str:
+        row = self.tbl_animal_forms.currentRow()
+        if row < 0:
+            return ""
+        item = self.tbl_animal_forms.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) or "" if item else ""
+
+    def _select_animal_form_row_by_id(self, fid: str) -> None:
+        for r in range(self.tbl_animal_forms.rowCount()):
+            it = self.tbl_animal_forms.item(r, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) == fid:
+                self.tbl_animal_forms.selectRow(r)
+                self._on_animal_form_selected(r, 0)
+                return
+
+    def _on_animal_form_selected(
+        self, row: int, _col: int, _prev_row: int = -1, _prev_col: int = -1
+    ) -> None:
+        if row < 0:
+            return
+        fid = self._selected_animal_form_id()
+        form = find_animal_form(fid, self.state)
+        if form is None:
+            return
+        access = compute_animal_form_access(self.state, self.computed, self.repo)
+        transformed = compute_transformed_stats(form, self.state, self.computed, access)
+        self.animal_form_browser.setHtml(render_animal_form_html(form, transformed))
+
+    def _create_custom_animal_form(self) -> None:
+        existing = {f.id for f in all_animal_forms(self.state)}
+        dlg = CustomAnimalFormDialog(existing_ids=existing, parent=self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        form = dlg.build_animal_form()
+        self.state.custom_animal_forms.append(animal_form_to_dict(form))
+        if dlg.chk_add_known.isChecked() and form.id not in self.state.animal_forms:
+            self.state.animal_forms.append(form.id)
+        self._mark_dirty()
+        self._sync_animal_forms_tab()
+        self._select_animal_form_row_by_id(form.id)
+
+    def _edit_selected_custom_animal_form(self) -> None:
+        fid = self._selected_animal_form_id()
+        if not fid:
+            return
+        if fid not in self._custom_animal_form_ids():
+            QMessageBox.information(
+                self,
+                "Built-In Form",
+                "Only custom animal forms can be edited directly. Click '+ Custom Form…' to create a new custom variant.",
+            )
+            return
+        cur_form = find_animal_form(fid, self.state)
+        dlg = CustomAnimalFormDialog(initial_form=cur_form, parent=self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        updated = dlg.build_animal_form()
+        updated_dict = animal_form_to_dict(updated)
+        replaced = False
+        for i, raw in enumerate(self.state.custom_animal_forms):
+            if isinstance(raw, dict) and str(raw.get("id") or "").strip() == fid:
+                self.state.custom_animal_forms[i] = updated_dict
+                replaced = True
+                break
+        if not replaced:
+            self.state.custom_animal_forms.append(updated_dict)
+        if dlg.chk_add_known.isChecked() and updated.id not in self.state.animal_forms:
+            self.state.animal_forms.append(updated.id)
+        self._mark_dirty()
+        self._sync_animal_forms_tab()
+        self._select_animal_form_row_by_id(updated.id)
+
+    def _add_selected_animal_form(self) -> None:
+        fid = self._selected_animal_form_id()
+        form = find_animal_form(fid, self.state)
+        if form is None or fid in self.state.animal_forms:
+            return
+        is_custom = fid in self._custom_animal_form_ids()
+        access = compute_animal_form_access(self.state, self.computed, self.repo)
+        ov_all = self.state.has_override("allow_all_animal_forms")
+        if not is_custom:
+            eligible, reason = is_form_eligible(form, access, override_all=ov_all)
+            if not eligible:
+                QMessageBox.information(
+                    self,
+                    "Form Not Eligible",
+                    f"{form.name} is restricted: {reason}\nEnable 'Allow all animal forms (manual override)' to add it anyway.",
+                )
+                return
+            if (
+                not ov_all
+                and access.known_forms_limit is not None
+                and len(self.state.animal_forms) >= access.known_forms_limit
+            ):
+                QMessageBox.information(
+                    self,
+                    "Known Forms Limit Reached",
+                    f"5.5e Druid Known Forms limit ({access.known_forms_limit}) reached.\n"
+                    "Remove a form or enable 'Allow all animal forms (manual override)'.",
+                )
+                return
+        self.state.animal_forms.append(fid)
+        self._mark_dirty()
+        self._sync_animal_forms_tab()
+
+    def _remove_selected_animal_form(self) -> None:
+        fid = self._selected_animal_form_id()
+        changed = False
+        if fid in self.state.animal_forms:
+            self.state.animal_forms.remove(fid)
+            changed = True
+        if fid and fid in self._custom_animal_form_ids():
+            self.state.custom_animal_forms = [
+                d
+                for d in self.state.custom_animal_forms
+                if not (isinstance(d, dict) and str(d.get("id") or "").strip() == fid)
+            ]
+            changed = True
+        if changed:
+            if self.state.active_animal_form_id == fid:
+                self.state.active_animal_form_id = ""
+            self._mark_dirty()
+            self._sync_animal_forms_tab()
+
+    def _toggle_active_animal_form(self) -> None:
+        fid = self._selected_animal_form_id()
+        if not fid:
+            return
+        if self.state.active_animal_form_id == fid:
+            self.state.active_animal_form_id = ""
+        else:
+            form = find_animal_form(fid, self.state)
+            is_custom = fid in self._custom_animal_form_ids()
+            access = compute_animal_form_access(self.state, self.computed, self.repo)
+            ov_all = self.state.has_override("allow_all_animal_forms")
+            if not is_custom:
+                eligible, reason = is_form_eligible(form, access, override_all=ov_all) if form else (False, "Unknown form")
+                if not eligible and fid not in self.state.animal_forms:
+                    QMessageBox.information(self, "Form Restricted", reason)
+                    return
+            self.state.active_animal_form_id = fid
+            if fid not in self.state.animal_forms:
+                self.state.animal_forms.append(fid)
+        self._mark_dirty()
+        self._sync_animal_forms_tab()
+
+    def _sync_companions_tab(self) -> None:
+        self.chk_override_companions.setChecked(self.state.has_override("allow_all_companions"))
+        prev_row = self.lst_char_companions.currentRow()
+        self.lst_char_companions.clear()
+        for idx, cdict in enumerate(self.state.companions):
+            comp = CompanionState.from_dict(cdict)
+            stats = compute_companion_stats(comp)
+            it = QListWidgetItem(
+                f"{comp.name} ({comp.companion_type} • AC {stats['ac']} • HP {comp.max_hp})"
+            )
+            it.setData(Qt.ItemDataRole.UserRole, idx)
+            self.lst_char_companions.addItem(it)
+        if self.state.companions:
+            target_row = prev_row if 0 <= prev_row < len(self.state.companions) else 0
+            self.lst_char_companions.setCurrentRow(target_row)
+            self._on_char_companion_selected(target_row)
+        else:
+            self.companion_preview_browser.setHtml(
+                "<p>No companions attached. Choose a template above or import a <code>.dndcomp</code> file.</p>"
+            )
+
+    def _on_companion_override_toggled(self, checked: int) -> None:
+        if self._updating:
+            return
+        self.state.set_override("allow_all_companions", bool(checked))
+        self._mark_dirty()
+        self._sync_companions_tab()
+
+    def _on_char_companion_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self.state.companions):
+            return
+        comp = CompanionState.from_dict(self.state.companions[row])
+        self.companion_preview_browser.setHtml(render_companion_sheet_html(comp))
+
+    def _add_companion_from_template(self) -> None:
+        tpl_key = self.cmb_companion_tpl.currentData() or "custom"
+        comp = create_companion_from_template(tpl_key, self.state, self.computed)
+        self.state.companions.append(comp.to_dict())
+        self._mark_dirty()
+        self._sync_companions_tab()
+
+    def _import_companion_to_character(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Attach Companion (.dndcomp)", str(self._characters_dir()), "Companion Files (*.dndcomp);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            comp = load_dndcomp(Path(path))
+            comp.owner_name = self.state.name or comp.owner_name
+            comp.owner_level = self.state.level
+            comp.owner_proficiency = self.computed.proficiency_bonus
+            self.state.companions.append(comp.to_dict())
+            self._mark_dirty()
+            self._sync_companions_tab()
+        except Exception as exc:
+            QMessageBox.warning(self, "Import Companion Failed", str(exc))
+
+    def _open_selected_attached_companion(self) -> None:
+        row = self.lst_char_companions.currentRow()
+        if row < 0 or row >= len(self.state.companions):
+            return
+        comp = CompanionState.from_dict(self.state.companions[row])
+        self._editing_attached_companion_idx = row
+        self.companion_view.set_characters_dir(self._characters_dir())
+        path = Path(comp.file_path) if comp.file_path else None
+        self.companion_view.load_companion(comp, path=path)
+        self.screen_stack.setCurrentWidget(self.companion_view)
+        self.title_bar.set_breadcrumb(f"Companion: {comp.name}")
+
+    def _save_selected_companion_standalone(self) -> None:
+        row = self.lst_char_companions.currentRow()
+        if row < 0 or row >= len(self.state.companions):
+            return
+        comp = CompanionState.from_dict(self.state.companions[row])
+        safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", comp.name or "companion").strip(" .") or "companion"
+        default_path = str(self._characters_dir() / f"{safe_stem}.dndcomp")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Companion (.dndcomp)", default_path, "Aurora Companion (*.dndcomp)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".dndcomp"):
+            path += ".dndcomp"
+        save_dndcomp(comp, Path(path))
+        comp.file_path = path
+        self.state.companions[row] = comp.to_dict()
+        self._mark_dirty()
+        self.refresh_library()
+        self._sync_companions_tab()
+
+    def _export_selected_companion_pdf(self) -> None:
+        row = self.lst_char_companions.currentRow()
+        if row < 0 or row >= len(self.state.companions):
+            return
+        comp = CompanionState.from_dict(self.state.companions[row])
+        default_path = f"{comp.name or 'companion'}.pdf"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Companion Sheet PDF", default_path, "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        export_companion_pdf(comp, Path(path))
+        self.statusBar().showMessage(f"Exported Companion PDF to {path}")
+
+    def _remove_selected_companion(self) -> None:
+        row = self.lst_char_companions.currentRow()
+        if 0 <= row < len(self.state.companions):
+            self.state.companions.pop(row)
+            self._mark_dirty()
+            self._sync_companions_tab()
 
     def _on_notes_changed(self) -> None:
         if self._updating:
@@ -2732,7 +4237,12 @@ class MainWindow(QMainWindow):
         self.state.notes = self.txt_notes.toPlainText()
         self.lbl_char_name.setText(self.state.name or "New Adventurer")
         self.lbl_top_name.setText(self.state.name or "New Adventurer")
-        self.txt_overview_name.setText(self.state.name)
+        self.title_bar.set_breadcrumb(self.state.name or "New Adventurer")
+        self._updating = True
+        try:
+            self.txt_overview_name.setText(self.state.name)
+        finally:
+            self._updating = False
         self._mark_dirty()
 
     def _pick_character_portrait(self) -> None:
@@ -2767,6 +4277,7 @@ class MainWindow(QMainWindow):
     def refresh_library(self) -> None:
         folder = self._characters_dir()
         folder.mkdir(parents=True, exist_ok=True)
+        self.companion_view.set_characters_dir(folder)
         summaries = scan_characters_folder(folder, set(self.config.favorites))
         self.select_view.set_header_info(
             folder_path=str(folder),
@@ -2783,6 +4294,7 @@ class MainWindow(QMainWindow):
         if chosen:
             self.config.characters_dir = chosen
             self._save_config()
+            self.companion_view.set_characters_dir(Path(chosen))
             self.refresh_library()
 
     def _toggle_favorite(self, filename: str) -> None:
@@ -2836,7 +4348,7 @@ class MainWindow(QMainWindow):
                 self, "Export Character Sheet PDF", f"{st.name or 'character'}.pdf", "PDF Files (*.pdf)"
             )
             if out_path:
-                if not out_path.endswith(".pdf"):
+                if not out_path.lower().endswith(".pdf"):
                     out_path += ".pdf"
                 export_character_pdf(
                     st, comp, self.repo, Path(out_path), templates_dir=self.templates_dir
@@ -2848,17 +4360,20 @@ class MainWindow(QMainWindow):
     def _find_character_name_conflict(
         self, name: str, exclude_path: Optional[Path] = None
     ) -> Optional[Path]:
-        """Return an existing .dnd5e file path if another character already uses this name or filename."""
+        """Return an existing .dnd5e/.dnd55e file path if another character already uses this name or filename."""
         folder = self._characters_dir()
         if not folder.is_dir():
             return None
         exclude_res = exclude_path.resolve() if exclude_path is not None else None
-        candidate = folder / _safe_filename(name)
-        if candidate.exists() and (exclude_res is None or candidate.resolve() != exclude_res):
-            return candidate
+        for rs in ("5e", "5.5e"):
+            candidate = folder / _safe_filename(name, rs)
+            if candidate.exists() and (exclude_res is None or candidate.resolve() != exclude_res):
+                return candidate
         norm = (name or "").strip().lower()
         if norm:
             for summary in scan_characters_folder(folder):
+                if getattr(summary, "entry_kind", "character") != "character":
+                    continue
                 if exclude_res is not None and summary.path.resolve() == exclude_res:
                     continue
                 if summary.name.strip().lower() == norm:
@@ -2867,7 +4382,10 @@ class MainWindow(QMainWindow):
 
     def import_dnd5e_to_library(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import .dnd5e Character", "", "Aurora Character (*.dnd5e);;All Files (*)"
+            self,
+            "Import Aurora File (.dnd5e / .dnd55e / .dndcomp)",
+            "",
+            "Aurora Files (*.dnd5e *.dnd55e *.dndcomp);;All Files (*)",
         )
         if not path:
             return
@@ -2884,7 +4402,10 @@ class MainWindow(QMainWindow):
                 dest = dest_dir / f"{stem}_{idx}{src.suffix}"
             shutil.copy2(src, dest)
         self.refresh_library()
-        self.open_character_file(dest)
+        if dest.suffix.lower() == ".dndcomp":
+            self.open_companion_file(dest)
+        else:
+            self.open_character_file(dest)
 
     def new_character_with_dialog(self) -> None:
         if not self.confirm_leave_character():
@@ -2910,6 +4431,7 @@ class MainWindow(QMainWindow):
             portrait_path=dlg.portrait_path,
             portrait_base64=dlg.portrait_base64,
         )
+        self._choices_sig = None
         self._dirty = True
         self._recalculate_and_refresh()
         self._switch_builder_tab(0)
@@ -2920,24 +4442,97 @@ class MainWindow(QMainWindow):
             return
         self.current_file = None
         self.state = CharacterState()
+        self._choices_sig = None
         self._dirty = True
         self._recalculate_and_refresh()
         self._switch_builder_tab(0)
         self.show_builder()
 
+    def new_companion(self) -> None:
+        if not self.confirm_leave_character():
+            return
+        self._editing_attached_companion_idx = None
+        comp = create_companion_from_template("wolf_companion")
+        comp.name = "New Companion"
+        self.companion_view.set_characters_dir(self._characters_dir())
+        self.companion_view.load_companion(comp, path=None)
+        self.screen_stack.setCurrentWidget(self.companion_view)
+        self.title_bar.set_breadcrumb("Companion: New Companion")
+
+    def open_companion_file(self, path: Path) -> None:
+        if not self.confirm_leave_character():
+            return
+        try:
+            comp = load_dndcomp(path)
+            self._editing_attached_companion_idx = None
+            self.companion_view.set_characters_dir(self._characters_dir())
+            self.companion_view.load_companion(comp, path=path)
+            self.screen_stack.setCurrentWidget(self.companion_view)
+            self.title_bar.set_breadcrumb(f"Companion: {comp.name}")
+            self.statusBar().showMessage(f"Opened companion {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Open Companion Failed", f"Could not load {path}:\n{exc}")
+
+    def _on_companion_saved(self, path: Path) -> None:
+        if self._editing_attached_companion_idx is not None:
+            idx = self._editing_attached_companion_idx
+            if 0 <= idx < len(self.state.companions):
+                self.companion_view.comp.file_path = str(path)
+                self.state.companions[idx] = self.companion_view.comp.to_dict()
+                self._mark_dirty()
+                self._sync_companions_tab()
+        self.refresh_library()
+
+    def _on_companion_back(self) -> None:
+        if self._editing_attached_companion_idx is not None:
+            idx = self._editing_attached_companion_idx
+            self._editing_attached_companion_idx = None
+            if 0 <= idx < len(self.state.companions):
+                self.state.companions[idx] = self.companion_view.comp.to_dict()
+                self._mark_dirty()
+                self._sync_companions_tab()
+            self.show_builder()
+            return
+        self.show_character_select()
+
+    def _export_companion_pdf_for_path(self, path: Path) -> None:
+        try:
+            comp = load_dndcomp(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))
+            return
+        default_name = f"{comp.name or 'companion'}.pdf"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Companion Sheet PDF", default_name, "PDF Files (*.pdf)"
+        )
+        if not out_path:
+            return
+        if not out_path.lower().endswith(".pdf"):
+            out_path += ".pdf"
+        export_companion_pdf(comp, Path(out_path))
+        self.statusBar().showMessage(f"Exported Companion PDF to {out_path}")
+
     def open_dialog(self) -> None:
         if not self.confirm_leave_character():
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Aurora Character", str(self._characters_dir()), "Aurora Character (*.dnd5e);;All Files (*)"
+            self,
+            "Open Aurora File",
+            str(self._characters_dir()),
+            "Aurora Files (*.dnd5e *.dnd55e *.dndcomp);;All Files (*)",
         )
         if path:
-            self.open_character_file(Path(path))
+            p = Path(path)
+            if p.suffix.lower() == ".dndcomp":
+                self.open_companion_file(p)
+            else:
+                self.open_character_file(p)
 
     def open_character_file(self, path: Path) -> None:
         try:
             self.state = load_dnd5e(path, self.repo)
             self.current_file = path
+            self._choices_sig = None
             self._dirty = False
             self._recalculate_and_refresh()
             self._switch_builder_tab(0)
@@ -2959,7 +4554,7 @@ class MainWindow(QMainWindow):
                     "Please rename your character or use Save As with a different filename.",
                 )
                 return False
-            target_file = folder / _safe_filename(self.state.name)
+            target_file = folder / _safe_filename(self.state.name, self.state.ruleset)
         else:
             conflict = self._find_character_name_conflict(self.state.name, exclude_path=self.current_file)
             if conflict is not None:
@@ -2983,13 +4578,18 @@ class MainWindow(QMainWindow):
             return False
 
     def save_character_as(self) -> None:
-        default_path = str(self._characters_dir() / _safe_filename(self.state.name))
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Aurora Character", default_path, "Aurora Character (*.dnd5e)"
+        ext = default_character_extension(self.state.ruleset)
+        default_path = str(self._characters_dir() / _safe_filename(self.state.name, self.state.ruleset))
+        filt = (
+            "Aurora 5.5e Character (*.dnd55e);;Aurora 5e Character (*.dnd5e)"
+            if ext == ".dnd55e"
+            else "Aurora 5e Character (*.dnd5e);;Aurora 5.5e Character (*.dnd55e)"
         )
+        path, _ = QFileDialog.getSaveFileName(self, "Save Aurora Character", default_path, filt)
         if path:
-            if not path.endswith(".dnd5e"):
-                path += ".dnd5e"
+            low = path.lower()
+            if not (low.endswith(".dnd5e") or low.endswith(".dnd55e")):
+                path += ext
             target = Path(path)
             if target.exists() and (self.current_file is None or target.resolve() != self.current_file.resolve()):
                 QMessageBox.warning(
@@ -3009,7 +4609,7 @@ class MainWindow(QMainWindow):
             self, "Export Character Sheet PDF", default_name, "PDF Files (*.pdf)"
         )
         if path:
-            if not path.endswith(".pdf"):
+            if not path.lower().endswith(".pdf"):
                 path += ".pdf"
             try:
                 export_character_pdf(
@@ -3030,6 +4630,20 @@ class MainWindow(QMainWindow):
             self.repo.load_directory(self.custom_dir)
         for cdir in self.config.custom_dirs:
             self.repo.load_directory(Path(cdir))
+
+        self._choices_sig = None
+        self._spell_catalog_sig = None
+        self._equip_catalog_sig = None
+        if hasattr(self, "cmb_spell_class"):
+            prev_cls = self.cmb_spell_class.currentData() or ""
+            self.cmb_spell_class.blockSignals(True)
+            self.cmb_spell_class.clear()
+            self.cmb_spell_class.addItem("All Classes", "")
+            for cname in self.repo.available_spell_classes():
+                self.cmb_spell_class.addItem(cname, cname.lower())
+            idx = self.cmb_spell_class.findData(prev_cls)
+            self.cmb_spell_class.setCurrentIndex(idx if idx >= 0 else 0)
+            self.cmb_spell_class.blockSignals(False)
 
         self.tab_race.refresh_list()
         self.tab_class.refresh_list()

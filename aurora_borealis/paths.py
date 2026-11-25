@@ -7,10 +7,34 @@ import re
 import subprocess
 from pathlib import Path
 
+from .platform_utils import get_windows_documents_dir, is_windows
+
 
 def get_os_documents_dir() -> Path:
     """Detect the OS standard Documents folder without creating ~/Documents blindly."""
     home = Path.home()
+
+    if is_windows():
+        win_docs = get_windows_documents_dir()
+        if win_docs is not None and win_docs.is_dir() and win_docs.resolve() != home.resolve():
+            return win_docs
+
+        try:
+            from PySide6.QtCore import QStandardPaths
+
+            loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+            if loc:
+                cand = Path(loc)
+                if cand.is_dir() and cand.resolve() != home.resolve():
+                    return cand
+        except Exception:
+            pass
+
+        for folder_name in ("Documents", "Dokumente"):
+            cand = home / folder_name
+            if cand.is_dir():
+                return cand
+        return home
 
     # 1. xdg-user-dir DOCUMENTS
     try:
@@ -72,6 +96,9 @@ def get_app_data_dir() -> Path:
     override = os.environ.get("AURORA_BOREALIS_DATA_DIR")
     if override:
         return Path(override)
+    if is_windows():
+        local_app = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        return local_app / "Aurora Borealis"
     xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     return xdg_data / "aurora-borealis"
 
@@ -92,5 +119,8 @@ def get_config_path() -> Path:
     override = os.environ.get("AURORA_BOREALIS_CONFIG_PATH")
     if override:
         return Path(override)
+    if is_windows():
+        roaming_app = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+        return roaming_app / "Aurora Borealis" / "config.json"
     xdg_cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return xdg_cfg / "aurora-borealis" / "config.json"
