@@ -39,8 +39,8 @@ from ..animal_forms import (
     AnimalForm,
     parse_cr_label,
 )
-from ..engine import parse_weight_lb
-from ..models import ABILITIES, ABILITY_ABBR, CharacterState, Element
+from ..engine import is_equipment_proficient, parse_weight_lb
+from ..models import ABILITIES, ABILITY_ABBR, CharacterState, ComputedCharacter, Element
 from ..loader import ContentRepository
 from ..models import DuplicateEntry, Element, InventoryItem
 from ..paths import get_os_downloads_dir
@@ -284,10 +284,12 @@ class MagicGearDialog(QDialog):
         self,
         repo: ContentRepository,
         initial_element: Optional[Element] = None,
+        computed: Optional[ComputedCharacter] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.repo = repo
+        self.computed = computed
         self._selected_base: Optional[Element] = None
         self.setWindowTitle("Create Magic / Infused Armor or Weapon")
         self.setMinimumSize(620, 480)
@@ -305,8 +307,12 @@ class MagicGearDialog(QDialog):
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText("Search base armor, shield, or weapon…")
         self.txt_search.textChanged.connect(self._refresh_base_list)
+        self.chk_proficient_only = QCheckBox("Proficient Only")
+        self.chk_proficient_only.setVisible(computed is not None)
+        self.chk_proficient_only.stateChanged.connect(self._refresh_base_list)
         top_filter.addWidget(self.cmb_kind, 1)
         top_filter.addWidget(self.txt_search, 2)
+        top_filter.addWidget(self.chk_proficient_only)
         layout.addLayout(top_filter)
 
         self.lst_base = QListWidget()
@@ -346,6 +352,8 @@ class MagicGearDialog(QDialog):
         kind = self.cmb_kind.currentText()
         types = ["Armor", "Weapon"] if kind.startswith("All") else [kind]
         items = self.repo.search(q, types)
+        if self.computed is not None and self.chk_proficient_only.isChecked():
+            items = [e for e in items if is_equipment_proficient(e, self.computed, self.repo) is True]
         items.sort(key=lambda e: (e.type, e.name.lower()))
         self.lst_base.clear()
         target_row = 0

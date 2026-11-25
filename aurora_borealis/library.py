@@ -30,6 +30,27 @@ class CharacterSummary:
     entry_kind: str = "character"  # "character" or "companion"
 
 
+def _extract_portrait_from_node(node: Optional[etree._Element]) -> tuple[str, str]:
+    """Extract (portrait_path, portrait_base64) supporting both flat and legacy nested <portrait>."""
+    if node is None:
+        return "", ""
+    p_path = ""
+    p_b64 = (node.findtext("portrait-data") or "").strip()
+    p_node = node.find("portrait")
+    if p_node is not None:
+        local = (p_node.findtext("local") or "").strip()
+        b64 = (p_node.findtext("base64") or "").strip()
+        if local:
+            p_path = local
+        if b64 and not p_b64:
+            p_b64 = b64
+        if not local and not b64:
+            flat = (p_node.text or "").strip()
+            if flat:
+                p_path = flat
+    return p_path, p_b64
+
+
 def scan_characters_folder(
     folder: Path, favorites: Optional[set[str]] = None
 ) -> list[CharacterSummary]:
@@ -118,8 +139,7 @@ def scan_characters_folder(
             rs = (disp.findtext("ruleset") or "").strip()
             if rs in ("5e", "5.5e"):
                 ruleset = rs
-            portrait_path = (disp.findtext("portrait") or "").strip()
-            portrait_base64 = (disp.findtext("portrait-data") or "").strip()
+            portrait_path, portrait_base64 = _extract_portrait_from_node(disp)
             hp_txt = (disp.findtext("hp") or "").strip()
             ac_txt = (disp.findtext("ac") or "").strip()
             spd_txt = (disp.findtext("speed") or "").strip()
@@ -137,10 +157,39 @@ def scan_characters_folder(
                 rs_inp = (inp.findtext("ruleset") or "").strip()
                 if rs_inp in ("5e", "5.5e"):
                     ruleset = rs_inp
+            inp_p, inp_b64 = _extract_portrait_from_node(inp)
             if not portrait_path:
-                portrait_path = (inp.findtext("portrait") or "").strip()
+                portrait_path = inp_p
             if not portrait_base64:
-                portrait_base64 = (inp.findtext("portrait-data") or "").strip()
+                portrait_base64 = inp_b64
+        if build is not None:
+            app_node = build.find("appearance")
+            if app_node is not None:
+                app_p, app_b64 = _extract_portrait_from_node(app_node)
+                if not portrait_path:
+                    portrait_path = app_p
+                if not portrait_base64:
+                    portrait_base64 = app_b64
+            elems_node = build.find("elements")
+            if elems_node is not None and (not race or not class_name or not background or level == 1):
+                cls_names: list[str] = []
+                max_lvl = 0
+                for el in elems_node.findall(".//element"):
+                    et = (el.get("type") or "").strip()
+                    en = (el.get("name") or "").strip()
+                    if et == "Race" and not race and en:
+                        race = en
+                    elif et == "Background" and not background and en:
+                        background = en
+                    elif et in ("Class", "Multiclass") and en:
+                        if en not in cls_names:
+                            cls_names.append(en)
+                    elif et == "Level" and en.isdigit():
+                        max_lvl = max(max_lvl, int(en))
+                if not class_name and cls_names:
+                    class_name = " / ".join(cls_names)
+                if max_lvl > level:
+                    level = max(1, min(20, max_lvl))
         if not name:
             name = dnd_path.stem
 

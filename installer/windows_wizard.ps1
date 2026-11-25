@@ -335,9 +335,8 @@ try {
     $ChkWinget.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 12)
 
     $GrpContentPacks = New-Object System.Windows.Forms.GroupBox
-    $GrpContentPacks.Text = "D&D Content Packs (Download during Setup)"
+    $GrpContentPacks.Text = "D&&D Content Packs (Download during Setup)"
     $GrpContentPacks.ForeColor = $FgLight
-    $GrpContentPacks.UseMnemonic = $false
     $GrpContentPacks.AutoSize = $true
     $GrpContentPacks.MinimumSize = New-Object System.Drawing.Size(650, 96)
     $GrpContentPacks.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 10)
@@ -613,6 +612,7 @@ try {
 
         if ($Script:ChildProc -ne $null -and $Script:ChildProc.HasExited) {
             $Script:PollTimer.Stop()
+            $Script:ChildProc.WaitForExit()
             $resOut2 = Read-NewLogChunk $Script:OutLog $Script:OutPos
             $Script:OutPos = [long]$resOut2[1]
             Append-RawText ([string]$resOut2[0])
@@ -708,6 +708,7 @@ try {
             -RedirectStandardError $Script:ErrLog `
             -WindowStyle Hidden `
             -PassThru
+        $null = $Script:ChildProc.Handle
         $Script:PollTimer.Start()
     }
 

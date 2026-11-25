@@ -340,7 +340,30 @@ def _convert_items(data: dict) -> list[etree._Element]:
         eid = f"ID_5ETOOLS_ITEM_{_slug(src)}_{_slug(name)}"
         el = _new_element(name, etype, f"5e.tools ({src})", eid)
         _set_description(el, render_5etools_entries(it.get("entries", [])))
+        item_type = str(it.get("type", "")).upper()
+        wcat = str(it.get("weaponCategory") or "").strip().lower()
+        sup_tokens: list[str] = []
+        if wcat:
+            sup_tokens.append(wcat.title())
+        type_support_map = {
+            "M": "Melee",
+            "R": "Ranged",
+            "AT": "Artisan's Tools",
+            "INS": "Musical Instrument",
+            "GS": "Gaming Set",
+            "T": "Tool",
+            "LA": "Light",
+            "MA": "Medium",
+            "HA": "Heavy",
+            "S": "Shield",
+        }
+        if item_type in type_support_map:
+            sup_tokens.append(type_support_map[item_type])
+        if sup_tokens:
+            etree.SubElement(el, "supports").text = ", ".join(dict.fromkeys(sup_tokens))
         setters = etree.SubElement(el, "setters")
+        if item_type in type_support_map:
+            etree.SubElement(setters, "set", name="category").text = type_support_map[item_type]
         if rarity not in ("none", "", "unknown"):
             etree.SubElement(setters, "set", name="rarity").text = rarity.title()
         if it.get("weight") is not None:
@@ -348,7 +371,6 @@ def _convert_items(data: dict) -> list[etree._Element]:
             w.text = f"{it['weight']} lb."
         if it.get("ac") is not None:
             etree.SubElement(setters, "set", name="armorClass").text = str(it["ac"])
-            item_type = str(it.get("type", "")).upper()
             if item_type == "LA":
                 etree.SubElement(setters, "set", name="armor").text = "Light"
             elif item_type == "MA":

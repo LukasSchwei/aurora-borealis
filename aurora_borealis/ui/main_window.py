@@ -80,6 +80,8 @@ from ..engine import (
     class_display_summary,
     effective_selection_slot_count,
     get_synthetic_asi_element,
+    is_equipment_proficient,
+    is_spell_castable_for_character,
     is_spell_concentration,
     is_spell_eligible_for_caster,
     is_spell_ritual,
@@ -1979,8 +1981,15 @@ class MainWindow(QMainWindow):
             "Artifact",
         ])
         self.cmb_equip_rarity.currentIndexChanged.connect(self._refresh_equip_catalog)
+        self.cmb_equip_proficiency = QComboBox()
+        self.cmb_equip_proficiency.addItem("All Proficiency", "all")
+        self.cmb_equip_proficiency.addItem("Proficient Only", "proficient")
+        self.cmb_equip_proficiency.addItem("Proficient & General Gear", "usable")
+        self.cmb_equip_proficiency.addItem("Not Proficient", "not_proficient")
+        self.cmb_equip_proficiency.currentIndexChanged.connect(self._refresh_equip_catalog)
         filter_row2.addWidget(self.cmb_equip_category, 1)
         filter_row2.addWidget(self.cmb_equip_rarity, 1)
+        filter_row2.addWidget(self.cmb_equip_proficiency, 1)
         cat_layout.addLayout(filter_row2)
 
         self.tbl_equip_catalog = QTableWidget(0, 5)
@@ -2162,9 +2171,16 @@ class MainWindow(QMainWindow):
         self.cmb_spell_prop.addItem("Ritual", "ritual")
         self.cmb_spell_prop.addItem("Concentration", "concentration")
         self.cmb_spell_prop.currentIndexChanged.connect(self._refresh_spell_catalog)
+        self.cmb_spell_proficiency = QComboBox()
+        self.cmb_spell_proficiency.addItem("All Availability", "all")
+        self.cmb_spell_proficiency.addItem("Proficient / Castable Only", "castable")
+        self.cmb_spell_proficiency.addItem("Class List (Any Level)", "class_list")
+        self.cmb_spell_proficiency.addItem("Not Castable", "not_castable")
+        self.cmb_spell_proficiency.currentIndexChanged.connect(self._refresh_spell_catalog)
         f_row2.addWidget(self.cmb_spell_class, 1)
         f_row2.addWidget(self.cmb_spell_school, 1)
         f_row2.addWidget(self.cmb_spell_prop, 1)
+        f_row2.addWidget(self.cmb_spell_proficiency, 1)
         cat_layout.addLayout(f_row2)
 
         self.tbl_spell_catalog = QTableWidget(0, 4)
@@ -2984,6 +3000,7 @@ class MainWindow(QMainWindow):
             self.tbl_inventory.setItem(
                 row, 5, QTableWidgetItem(f"{inv.weight * inv.quantity:.1f} lb")
             )
+        self._refresh_equip_catalog()
 
     def _spell_counts(self) -> tuple[int, int, list[str]]:
         granted = self.computed.spellcasting.granted_spell_ids if self.computed.spellcasting else []
@@ -3850,6 +3867,11 @@ class MainWindow(QMainWindow):
                 extra += f" | AC: {el.setters['armorClass']}"
             if el.setters.get("damage"):
                 extra += f" | Damage: {el.setters['damage']} {el.setters.get('damage_type', '')}".rstrip()
+            prof_status = is_equipment_proficient(el, getattr(self, "computed", None), self.repo)
+            if prof_status is True:
+                extra += " | Proficiency: Proficient"
+            elif prof_status is False:
+                extra += " | Proficiency: Not Proficient"
             body = el.description_html or el.sheet_description or "<p>No description available.</p>"
             self.equip_desc_browser.setHtml(
                 f"<h3>{el.name}</h3><p style='color:#7dd3fc;'>{el.type} — {el.source}{extra}</p>{body}"
@@ -3914,12 +3936,21 @@ class MainWindow(QMainWindow):
         cat = self.cmb_equip_type.currentText()
         sub_cat = self.cmb_equip_category.currentText() if hasattr(self, "cmb_equip_category") else "All Categories"
         rarity_filter = self.cmb_equip_rarity.currentText() if hasattr(self, "cmb_equip_rarity") else "All Rarities"
+        prof_filter = self.cmb_equip_proficiency.currentData() if hasattr(self, "cmb_equip_proficiency") else "all"
         types = ["Weapon", "Armor", "Item", "Magic Item"] if cat == "All" else [cat]
         results = self.repo.search(query, types)
         if sub_cat != "All Categories":
             results = [e for e in results if self._matches_equip_category(e, sub_cat)]
         if rarity_filter != "All Rarities":
             results = [e for e in results if _item_rarity_info(e)[2].lower() == rarity_filter.lower()]
+        computed_now = getattr(self, "computed", None)
+        if prof_filter and prof_filter != "all" and computed_now is not None:
+            if prof_filter == "proficient":
+                results = [e for e in results if is_equipment_proficient(e, computed_now, self.repo) is True]
+            elif prof_filter == "usable":
+                results = [e for e in results if is_equipment_proficient(e, computed_now, self.repo) is not False]
+            elif prof_filter == "not_proficient":
+                results = [e for e in results if is_equipment_proficient(e, computed_now, self.repo) is False]
         reverse = self._equip_sort_order == Qt.SortOrder.DescendingOrder
         if self._equip_sort_col == 0:
             results.sort(key=lambda e: (e.type.lower(), e.name.lower()), reverse=reverse)
@@ -3975,7 +4006,7 @@ class MainWindow(QMainWindow):
             cand = self.repo.get(eid) if eid else None
             if cand is not None and cand.type in ("Armor", "Weapon"):
                 initial_el = cand
-        dlg = MagicGearDialog(self.repo, initial_element=initial_el, parent=self)
+        dlg = MagicGearDialog(self.repo, initial_element=initial_el, computed=getattr(self, "computed", None), parent=self)
         if dlg.exec() == dlg.DialogCode.Accepted:
             inv_item = dlg.build_inventory_item()
             if inv_item is not None:
@@ -4063,10 +4094,16 @@ class MainWindow(QMainWindow):
         class_filter = self.cmb_spell_class.currentData() or "" if hasattr(self, "cmb_spell_class") else ""
         school_filter = self.cmb_spell_school.currentData() or "" if hasattr(self, "cmb_spell_school") else ""
         prop_filter = self.cmb_spell_prop.currentData() or "" if hasattr(self, "cmb_spell_prop") else ""
+        prof_filter = self.cmb_spell_proficiency.currentData() or "all" if hasattr(self, "cmb_spell_proficiency") else "all"
         caster_filter = self.cmb_spell_caster.currentData() if hasattr(self, "cmb_spell_caster") else "__all__"
         spells = self.repo.search(query, ["Spell"])
 
-        sc = self.computed.spellcasting
+        sc = getattr(self, "computed", None).spellcasting if getattr(self, "computed", None) is not None else None
+        target_c: Optional[ClassSpellcasting] = None
+        if sc and sc.casters and caster_filter and caster_filter.startswith("caster::"):
+            target_cid = caster_filter.split("::", 1)[1]
+            target_c = next((c for c in sc.casters if c.source_class_id == target_cid), None)
+
         if sc and sc.casters and caster_filter and caster_filter != "__all__":
             if caster_filter == "__eligible__":
                 spells = [
@@ -4074,11 +4111,29 @@ class MainWindow(QMainWindow):
                     for el in spells
                     if any(is_spell_eligible_for_caster(el, c) for c in sc.casters)
                 ]
-            elif caster_filter.startswith("caster::"):
-                target_cid = caster_filter.split("::", 1)[1]
-                target_c = next((c for c in sc.casters if c.source_class_id == target_cid), None)
-                if target_c is not None:
-                    spells = [el for el in spells if is_spell_eligible_for_caster(el, target_c)]
+            elif target_c is not None:
+                spells = [el for el in spells if is_spell_eligible_for_caster(el, target_c)]
+
+        computed_now = getattr(self, "computed", None)
+        if prof_filter and prof_filter != "all" and computed_now is not None:
+            if prof_filter == "castable":
+                spells = [el for el in spells if is_spell_castable_for_character(el, computed_now, target_c)]
+            elif prof_filter == "class_list":
+                granted_set = {e.id for e in computed_now.granted_elements}
+                if sc and sc.casters:
+                    check_casters = [target_c] if target_c is not None else sc.casters
+                    spells = [
+                        el
+                        for el in spells
+                        if el.id in granted_set
+                        or el.id in sc.granted_spell_ids
+                        or el.id in sc.always_prepared_spell_ids
+                        or any(is_spell_eligible_for_caster(el, c) for c in check_casters)
+                    ]
+                else:
+                    spells = [el for el in spells if el.id in granted_set]
+            elif prof_filter == "not_castable":
+                spells = [el for el in spells if not is_spell_castable_for_character(el, computed_now, target_c)]
 
         if class_filter:
             cf_lower = class_filter.lower()

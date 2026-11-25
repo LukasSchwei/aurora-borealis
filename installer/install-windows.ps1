@@ -16,6 +16,25 @@ $RepoDir = Split-Path -Parent $InstallerDir
 $DoDesktopShortcut = ([bool]$CreateDesktopShortcut) -and (-not $NoDesktopShortcut.IsPresent)
 $DoFileAssociations = ([bool]$RegisterFileAssociations) -and (-not $NoFileAssociations.IsPresent)
 
+function Invoke-NativeChecked {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Command,
+        [string]$Description = "Command"
+    )
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $global:LASTEXITCODE = 0
+        & $Command
+        $ec = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
+    if ($ec -ne 0) {
+        throw "$Description failed with exit code $ec."
+    }
+}
+
 function Find-Python310 {
     if (Get-Command py -ErrorAction SilentlyContinue) {
         try {
@@ -57,7 +76,7 @@ $PythonCmd = Find-Python310
 if (-not $PythonCmd) {
     if (-not $SkipWinget -and (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Host "[1/5] Installing Python 3.12 via winget..."
-        & winget install --id Python.Python.3.12 -e --source winget --scope user --accept-package-agreements --accept-source-agreements
+        Invoke-NativeChecked { & winget install --id Python.Python.3.12 -e --source winget --scope user --accept-package-agreements --accept-source-agreements } "winget install Python.Python.3.12"
         $env:PATH = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
         $PythonCmd = Find-Python310
     }
@@ -71,7 +90,7 @@ if (-not $SkipWinget -and -not (Get-Command 7z -ErrorAction SilentlyContinue) -a
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Host "Optional: installing 7-Zip via winget for Aurora .msi extraction..."
         try {
-            & winget install --id 7zip.7zip -e --source winget --accept-package-agreements --accept-source-agreements
+            Invoke-NativeChecked { & winget install --id 7zip.7zip -e --source winget --accept-package-agreements --accept-source-agreements } "winget install 7zip.7zip"
         } catch {
             Write-Warning "Could not install 7-Zip automatically; Aurora GitHub/5e.tools features still work without it."
         }
@@ -107,13 +126,13 @@ if ($InPlace) {
 Write-Host "[3/5] Creating virtual environment and installing dependencies (PySide6, lxml, pypdf)..."
 $VenvDir = Join-Path $TargetDir ".venv"
 if ($PythonCmd.Count -eq 2) {
-    & $PythonCmd[0] $PythonCmd[1] -m venv $VenvDir
+    Invoke-NativeChecked { & $PythonCmd[0] $PythonCmd[1] -m venv $VenvDir } "Create virtual environment"
 } else {
-    & $PythonCmd[0] -m venv $VenvDir
+    Invoke-NativeChecked { & $PythonCmd[0] -m venv $VenvDir } "Create virtual environment"
 }
 $VenvPy = Join-Path $VenvDir "Scripts\python.exe"
-& $VenvPy -m pip install --upgrade pip setuptools wheel
-& $VenvPy -m pip install --no-build-isolation -e $TargetDir
+Invoke-NativeChecked { & $VenvPy -m pip install --upgrade pip setuptools wheel } "Upgrade pip/setuptools/wheel"
+Invoke-NativeChecked { & $VenvPy -m pip install --no-build-isolation -e $TargetDir } "Install Aurora Borealis package"
 
 $BundledTplDir = Join-Path $TargetDir "aurora_borealis\assets\templates"
 $UserTplDir = Join-Path $env:LOCALAPPDATA "Aurora Borealis\templates"
@@ -247,12 +266,12 @@ public class AuroraShellNotify {
 $InstalledPacks = @()
 if ($InstallAuroraLegacy) {
     Write-Host "[Content] Downloading & installing official Aurora Legacy content from GitHub..."
-    & $VenvPy -u -m aurora_borealis.main --sync-official
+    Invoke-NativeChecked { & $VenvPy -u -m aurora_borealis.main --sync-official } "Sync Aurora Legacy content"
     $InstalledPacks += "Aurora Legacy"
 }
 if ($InstallFiveTools) {
     Write-Host "[Content] Downloading & converting 5e.tools D&D 5e/5.5e content from GitHub..."
-    & $VenvPy -u -m aurora_borealis.main --sync-5etools
+    Invoke-NativeChecked { & $VenvPy -u -m aurora_borealis.main --sync-5etools } "Sync 5e.tools content"
     $InstalledPacks += "5e.tools"
 }
 $PackSummary = if ($InstalledPacks.Count -gt 0) { $InstalledPacks -join ", " } else { "On-demand in app" }

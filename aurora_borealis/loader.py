@@ -181,6 +181,7 @@ class ContentRepository:
         self._search_blobs: dict[str, str] = {}
         self._support_tokens: dict[str, frozenset[str]] = {}
         self._match_cache: dict[tuple[str, str], tuple[Element, ...]] = {}
+        self._pending_appends: list[tuple[str, list[str], list[GrantRule], list[SelectRule], list[StatRule]]] = []
 
     def clear(self) -> None:
         self.by_id.clear()
@@ -193,6 +194,7 @@ class ContentRepository:
         self._search_blobs.clear()
         self._support_tokens.clear()
         self._match_cache.clear()
+        self._pending_appends.clear()
 
     def duplicate_summary(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
@@ -244,6 +246,7 @@ class ContentRepository:
             if loaded > 0:
                 self.file_count += 1
                 count += loaded
+        self._apply_pending_appends()
         self._sync_type_lists_and_caches()
         return count
 
@@ -263,6 +266,17 @@ class ContentRepository:
             return 0
 
         added = 0
+        for app_node in root.findall("append"):
+            target_id = (app_node.get("id") or "").strip()
+            if not target_id:
+                continue
+            sup_txt = (app_node.findtext("supports") or "").strip()
+            extra_sups = [s.strip() for s in sup_txt.split(",") if s.strip()]
+            g_rules, s_rules, st_rules = self._parse_rules(app_node.find("rules"))
+            if extra_sups or g_rules or s_rules or st_rules:
+                self._pending_appends.append((target_id, extra_sups, g_rules, s_rules, st_rules))
+                added += 1
+
         for node in root.findall("element"):
             el = self._parse_element(node)
             if el is None:
@@ -307,6 +321,27 @@ class ContentRepository:
             self._register_in_type_list(el, path)
             added += 1
         return added
+
+    def _apply_pending_appends(self) -> None:
+        """Apply Aurora <append id='...'> extensions to loaded elements."""
+        if not self._pending_appends:
+            return
+        remaining: list[tuple[str, list[str], list[GrantRule], list[SelectRule], list[StatRule]]] = []
+        for target_id, extra_sups, g_rules, s_rules, st_rules in self._pending_appends:
+            el = self.by_id.get(target_id)
+            if el is None:
+                remaining.append((target_id, extra_sups, g_rules, s_rules, st_rules))
+                continue
+            existing_sups = {s.lower() for s in el.supports}
+            for sup in extra_sups:
+                if sup.lower() not in existing_sups:
+                    el.supports.append(sup)
+                    existing_sups.add(sup.lower())
+            el.grant_rules.extend(g_rules)
+            el.select_rules.extend(s_rules)
+            el.stat_rules.extend(st_rules)
+            self._index_element_metadata(el)
+        self._pending_appends = remaining
 
     def _register_in_type_list(self, el: Element, path: Path) -> None:
         if el.type not in _CHARACTER_FACING_TYPES:

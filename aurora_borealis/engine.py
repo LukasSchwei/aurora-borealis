@@ -538,6 +538,286 @@ def is_spell_eligible_for_caster(spell: Element, caster: ClassSpellcasting) -> b
     return False
 
 
+_SIMPLE_WEAPONS: frozenset[str] = frozenset({
+    "club", "dagger", "greatclub", "handaxe", "javelin", "light hammer",
+    "mace", "quarterstaff", "sickle", "spear", "light crossbow", "dart",
+    "shortbow", "sling",
+})
+
+_MARTIAL_WEAPONS: frozenset[str] = frozenset({
+    "battleaxe", "flail", "glaive", "greataxe", "greatsword", "halberd",
+    "lance", "longsword", "maul", "morningstar", "pike", "rapier",
+    "scimitar", "shortsword", "trident", "war pick", "warhammer", "whip",
+    "blowgun", "hand crossbow", "heavy crossbow", "longbow", "net",
+})
+
+_FIREARM_WEAPONS: frozenset[str] = frozenset({
+    "pistol", "musket", "blunderbuss", "pepperbox", "bad news", "palm pistol",
+    "hunting rifle", "automatic rifle", "revolver", "shotgun",
+    "laser pistol", "antimatter rifle", "laser rifle",
+})
+
+_ARMOR_KIND_BY_NAME: dict[str, str] = {
+    "padded": "light",
+    "padded armor": "light",
+    "leather": "light",
+    "leather armor": "light",
+    "studded leather": "light",
+    "studded leather armor": "light",
+    "hide": "medium",
+    "hide armor": "medium",
+    "chain shirt": "medium",
+    "scale mail": "medium",
+    "breastplate": "medium",
+    "half plate": "medium",
+    "half plate armor": "medium",
+    "spiked armor": "medium",
+    "ring mail": "heavy",
+    "chain mail": "heavy",
+    "splint": "heavy",
+    "splint armor": "heavy",
+    "plate": "heavy",
+    "plate armor": "heavy",
+    "shield": "shield",
+    "buckler": "shield",
+}
+
+_ALL_WEAPON_NAMES_SORTED: tuple[str, ...] = tuple(
+    sorted(_SIMPLE_WEAPONS | _MARTIAL_WEAPONS | _FIREARM_WEAPONS, key=len, reverse=True)
+)
+_ALL_ARMOR_NAMES_SORTED: tuple[str, ...] = tuple(
+    sorted(_ARMOR_KIND_BY_NAME.keys(), key=len, reverse=True)
+)
+
+
+def _normalize_prof_variants(raw: str) -> set[str]:
+    """Normalize a proficiency label into lowercase base and singular/plural variants."""
+    s = (raw or "").strip().lower()
+    if not s:
+        return set()
+    for prefix in (
+        "weapon proficiency (",
+        "armor proficiency (",
+        "tool proficiency (",
+        "musical instrument (",
+        "gaming set (",
+        "proficiency (",
+    ):
+        if s.startswith(prefix) and s.endswith(")"):
+            s = s[len(prefix) : -1].strip()
+            break
+    s = re.sub(r"\s+", " ", s).strip()
+    variants = {s}
+    if s.endswith("staves"):
+        variants.add(s[:-6] + "staff")
+    elif s.endswith("ves") and len(s) > 4:
+        variants.add(s[:-3] + "f")
+        variants.add(s[:-3] + "fe")
+    elif s.endswith("ies") and len(s) > 4:
+        variants.add(s[:-3] + "y")
+    elif s.endswith("s") and not s.endswith("ss") and len(s) > 3:
+        variants.add(s[:-1])
+    if s.endswith("staff"):
+        variants.add(s[:-5] + "staves")
+    elif not s.endswith("s"):
+        variants.add(s + "s")
+    if s.endswith(" armor"):
+        variants.add(s[:-6].strip())
+    return {v for v in variants if v}
+
+
+def is_equipment_proficient(
+    el: Optional[Element],
+    computed: Optional[ComputedCharacter],
+    repo: Optional[ContentRepository] = None,
+) -> Optional[bool]:
+    """Return True if proficient, False if lacking required proficiency, or None if no proficiency is needed."""
+    if el is None or computed is None:
+        return None
+
+    prof_ids: set[str] = set()
+    prof_names: set[str] = set()
+    for granted in computed.granted_elements:
+        if granted.type == "Proficiency":
+            prof_ids.add(granted.id.strip().lower())
+            prof_names.update(_normalize_prof_variants(granted.name))
+    for p in computed.proficiencies:
+        prof_names.update(_normalize_prof_variants(p))
+
+    explicit_prof_id = (el.setters.get("proficiency") or "").strip().lower()
+    if explicit_prof_id and explicit_prof_id in prof_ids:
+        return True
+
+    name_l = el.name.strip().lower()
+    cat_l = (el.setters.get("category") or "").strip().lower()
+    type_setter_l = (el.setters.get("type") or "").strip().lower()
+    slot_l = (el.setters.get("slot") or "").strip().lower()
+    armor_setter_l = (el.setters.get("armor") or "").strip().lower()
+    supports_l = {s.strip().lower() for s in el.supports if s.strip()}
+    blob = " ".join([name_l, cat_l, type_setter_l, slot_l, armor_setter_l, *supports_l])
+
+    # 1. Armor & Shields
+    armor_kind = ""
+    if armor_setter_l in ("light", "medium", "heavy", "shield"):
+        armor_kind = armor_setter_l
+    elif el.type == "Armor":
+        if "shield" in blob or slot_l == "shield":
+            armor_kind = "shield"
+        elif "light" in supports_l or "light armor" in blob:
+            armor_kind = "light"
+        elif "medium" in supports_l or "medium armor" in blob:
+            armor_kind = "medium"
+        elif "heavy" in supports_l or "heavy armor" in blob:
+            armor_kind = "heavy"
+    if not armor_kind and (el.type == "Armor" or el.type == "Magic Item"):
+        for aname in _ALL_ARMOR_NAMES_SORTED:
+            if re.search(rf"(?<![a-z0-9]){re.escape(aname)}(?![a-z0-9])", name_l):
+                armor_kind = _ARMOR_KIND_BY_NAME[aname]
+                break
+
+    if armor_kind or el.type == "Armor":
+        item_variants = _normalize_prof_variants(name_l)
+        if item_variants & prof_names:
+            return True
+        if armor_kind == "shield":
+            return bool({"shield", "shields"} & prof_names) or "id_proficiency_armor_proficiency_shields" in prof_ids
+        if armor_kind in ("light", "medium", "heavy"):
+            if {"all armor", "armor"} & prof_names:
+                return True
+            if {armor_kind, f"{armor_kind} armor"} & prof_names:
+                return True
+            if f"id_proficiency_armor_proficiency_{armor_kind}_armor" in prof_ids:
+                return True
+            return False
+        return False
+
+    # 2. Weapons (including Magic Weapons)
+    matched_weapon = ""
+    for wname in _ALL_WEAPON_NAMES_SORTED:
+        if re.search(rf"(?<![a-z0-9]){re.escape(wname)}(?![a-z0-9])", name_l):
+            matched_weapon = wname
+            break
+    is_weapon = (
+        el.type == "Weapon"
+        or bool(el.setters.get("damage"))
+        or "weapon" in cat_l
+        or "weapon" in supports_l
+        or (el.type == "Magic Item" and bool(matched_weapon))
+    )
+    if is_weapon:
+        if _normalize_prof_variants(name_l) & prof_names:
+            return True
+        if matched_weapon and (_normalize_prof_variants(matched_weapon) & prof_names):
+            return True
+        if explicit_prof_id and repo is not None:
+            prof_el = repo.get(el.setters.get("proficiency", ""))
+            if prof_el is not None and (_normalize_prof_variants(prof_el.name) & prof_names):
+                return True
+
+        is_simple = (
+            "simple" in supports_l
+            or "simple" in cat_l
+            or "simple" in type_setter_l
+            or matched_weapon in _SIMPLE_WEAPONS
+        )
+        is_martial = (
+            "martial" in supports_l
+            or "martial" in cat_l
+            or "martial" in type_setter_l
+            or matched_weapon in _MARTIAL_WEAPONS
+        )
+        is_firearm = (
+            "firearm" in blob
+            or matched_weapon in _FIREARM_WEAPONS
+        )
+        is_melee = "melee" in blob
+        is_ranged = "ranged" in blob
+
+        if is_simple and (
+            {"simple", "simple weapon", "simple weapons", "all weapons"} & prof_names
+            or "id_proficiency_weapon_proficiency_simple_weapons" in prof_ids
+            or (is_melee and "simple melee weapons" in prof_names)
+            or (is_ranged and "simple ranged weapons" in prof_names)
+        ):
+            return True
+        if is_martial and (
+            {"martial", "martial weapon", "martial weapons", "all weapons"} & prof_names
+            or "id_proficiency_weapon_proficiency_martial_weapons" in prof_ids
+            or (is_melee and "martial melee weapons" in prof_names)
+            or (is_ranged and "martial ranged weapons" in prof_names)
+        ):
+            return True
+        if is_firearm and ({"firearm", "firearms"} & prof_names):
+            return True
+        return False
+
+    # 3. Tools, Kits, Musical Instruments, Gaming Sets
+    tool_keywords = (
+        "tool",
+        "artisan",
+        "kit",
+        "instrument",
+        "gaming set",
+        "thieves' tools",
+        "thieves tools",
+        "navigator",
+        "herbalism",
+        "disguise",
+        "forgery",
+        "poisoner",
+    )
+    is_tool = (
+        el.type in ("Item", "Magic Item")
+        and any(kw in blob for kw in tool_keywords)
+        and "scroll" not in blob
+        and "potion" not in blob
+    )
+    if is_tool:
+        if _normalize_prof_variants(name_l) & prof_names:
+            return True
+        if "artisan" in blob and ({"artisan's tools", "artisans tools", "artisan tools"} & prof_names):
+            return True
+        if "instrument" in blob and ({"musical instrument", "musical instruments"} & prof_names):
+            return True
+        if "gaming" in blob and ({"gaming set", "gaming sets"} & prof_names):
+            return True
+        return False
+
+    return None
+
+
+def is_spell_castable_for_character(
+    spell: Element,
+    computed: Optional[ComputedCharacter],
+    caster: Optional[ClassSpellcasting] = None,
+) -> bool:
+    """Return True if the character can currently cast this spell (granted or on list within max slot level)."""
+    if computed is None:
+        return False
+    if any(e.id == spell.id for e in computed.granted_elements):
+        return True
+    sc = computed.spellcasting
+    if sc is None:
+        return False
+    if spell.id in sc.granted_spell_ids or spell.id in sc.always_prepared_spell_ids:
+        return True
+    if not sc.casters:
+        return False
+
+    lvl_raw = str(spell.setters.get("level", "0")).strip()
+    lvl = int(lvl_raw) if lvl_raw.isdigit() else 0
+    target_casters = [caster] if caster is not None else sc.casters
+    for c in target_casters:
+        if not is_spell_eligible_for_caster(spell, c):
+            continue
+        if lvl == 0:
+            if c.max_cantrips > 0 or spell.id in c.extended_spell_ids or spell.id in c.granted_spell_ids:
+                return True
+        elif lvl <= c.max_spell_level:
+            return True
+    return False
+
+
 class RulesEngine:
     """Evaluates CharacterState against ContentRepository."""
 
