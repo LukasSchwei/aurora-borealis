@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QMarginsF, QRectF, QSizeF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
 
 from .animal_forms import find_animal_form
 from .engine import class_display_summary, effective_selection_slot_count, selection_filled_count
@@ -742,6 +742,110 @@ def _build_5e_field_map(
     return text, checked
 
 
+def _wrap_text_no_midword(
+    text: str,
+    fm: QFontMetricsF,
+    max_w: float,
+) -> tuple[list[str], bool]:
+    """Wrap text strictly at word boundaries, never breaking inside a word."""
+    lines: list[str] = []
+    word_overflow = False
+    paragraphs = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for para in paragraphs:
+        stripped = para.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        words = stripped.split()
+        cur_line = ""
+        for word in words:
+            if fm.horizontalAdvance(word) > max_w:
+                word_overflow = True
+            if not cur_line:
+                cur_line = word
+            else:
+                cand = f"{cur_line} {word}"
+                if fm.horizontalAdvance(cand) <= max_w:
+                    cur_line = cand
+                else:
+                    lines.append(cur_line)
+                    cur_line = word
+        if cur_line:
+            lines.append(cur_line)
+    return (lines or [""]), word_overflow
+
+
+def _fit_text_layout(
+    text: str,
+    w: float,
+    h: float,
+    size: float,
+    bold: bool = False,
+    wrap: bool = False,
+    min_size: float = 4.0,
+    device=None,
+) -> tuple[float, str]:
+    """Shrink font size and/or wrap cleanly on word boundaries so text fits within `(w, h)`."""
+    if not text:
+        return float(size), ""
+    font_family = "Arial" if is_windows() else "Sans Serif"
+    usable_w = max(4.0, float(w) - 0.8)
+    usable_h = max(4.0, float(h))
+    start_pt = max(3.0, float(size))
+    floor_pt = min(start_pt, max(3.0, float(min_size)))
+
+    def _metrics(pt: float) -> QFontMetricsF:
+        f = QFont(font_family)
+        f.setPointSizeF(pt)
+        f.setBold(bold)
+        return QFontMetricsF(f, device) if device is not None else QFontMetricsF(f)
+
+    if not wrap:
+        pt = start_pt
+        min_single_pt = min(floor_pt, 2.5)
+        best_pt = min_single_pt
+        while pt >= min_single_pt - 1e-6:
+            fm = _metrics(pt)
+            tw = max(fm.horizontalAdvance(text), fm.boundingRect(text).width())
+            best_pt = pt
+            if tw <= usable_w:
+                return pt, text
+            pt = round(pt - 0.25, 2)
+        return best_pt, text
+
+    pt = start_pt
+    best_pt = floor_pt
+    best_lines: list[str] = [text]
+    last_overflow = False
+    last_total_h = 0.0
+    while pt >= floor_pt - 1e-6:
+        fm = _metrics(pt)
+        lines, word_overflow = _wrap_text_no_midword(text, fm, usable_w)
+        total_h = max(0, len(lines) - 1) * fm.lineSpacing() + fm.height()
+        best_pt = pt
+        best_lines = lines
+        last_overflow = word_overflow
+        last_total_h = total_h
+        if not word_overflow and total_h <= usable_h + 0.5:
+            return pt, "\n".join(lines)
+        pt = round(pt - 0.25, 2)
+
+    need_extra_shrink = last_overflow or (usable_h <= 28.0 and last_total_h > usable_h + 0.5)
+    if need_extra_shrink and best_pt > 3.0:
+        pt = round(best_pt - 0.25, 2)
+        while pt >= 3.0 - 1e-6:
+            fm = _metrics(pt)
+            lines, word_overflow = _wrap_text_no_midword(text, fm, usable_w)
+            total_h = max(0, len(lines) - 1) * fm.lineSpacing() + fm.height()
+            best_pt = pt
+            best_lines = lines
+            if not word_overflow and (usable_h > 28.0 or total_h <= usable_h + 0.5):
+                break
+            pt = round(pt - 0.25, 2)
+
+    return best_pt, "\n".join(best_lines)
+
+
 def _draw_text(
     painter: QPainter,
     x: float,
@@ -753,16 +857,26 @@ def _draw_text(
     bold: bool = False,
     align: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
     wrap: bool = False,
+    min_size: float = 4.0,
 ) -> None:
-    font = QFont("Arial" if is_windows() else "Sans Serif", int(size))
-    font.setPointSizeF(size)
+    if not text:
+        return
+    fitted_size, fitted_text = _fit_text_layout(
+        text,
+        w,
+        h,
+        size=size,
+        bold=bold,
+        wrap=wrap,
+        min_size=min_size,
+        device=painter.device(),
+    )
+    font = QFont("Arial" if is_windows() else "Sans Serif")
+    font.setPointSizeF(fitted_size)
     font.setBold(bold)
     painter.setFont(font)
     painter.setPen(QColor("#111827"))
-    flags = int(align)
-    if wrap:
-        flags |= int(Qt.TextFlag.TextWordWrap)
-    painter.drawText(QRectF(x, y, w, h), flags, text)
+    painter.drawText(QRectF(x, y, w, h), int(align), fitted_text)
 
 
 def _get_pdf_page_size(pdf_path: Path) -> tuple[float, float]:
@@ -1217,11 +1331,11 @@ def export_55e_overlay_pdf(
                 srange = sel.setters.get("range", "") if sel else ""
                 sy = 182.5 + idx * 19.72
                 _draw_text(painter, 17.8, sy, 20.4, 16.5, lvl, size=8.0, align=Qt.AlignmentFlag.AlignCenter)
-                _draw_text(painter, 42.9, sy, 109.4, 16.5, sname, size=8.0)
+                _draw_text(painter, 42.9, sy, 109.4, 16.5, sname, size=8.0, wrap=True, min_size=4.8)
                 if ctime:
-                    _draw_text(painter, 157.1, sy, 29.8, 16.5, ctime, size=6.8)
+                    _draw_text(painter, 157.1, sy, 29.8, 16.5, ctime, size=6.8, wrap=True, min_size=4.2)
                 if srange:
-                    _draw_text(painter, 191.7, sy, 41.9, 16.5, srange, size=6.8)
+                    _draw_text(painter, 191.7, sy, 41.9, 16.5, srange, size=6.8, wrap=True, min_size=4.0)
 
                 if sel is not None:
                     sup_l = " ".join(sel.supports).lower()

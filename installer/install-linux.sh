@@ -94,6 +94,7 @@ install_desktop_integration() {
     local mime_dir="${DATA_HOME}/mime/packages"
 
     mkdir -p "${apps_dir}" "${icon_scalable_dir}" "${icon_256_dir}" "${mime_dir}"
+    chmod +x "${app_dir}/aurora-borealis" 2>/dev/null || true
 
     cp "${app_dir}/aurora_borealis/assets/aurora-borealis.svg" "${icon_scalable_dir}/aurora-borealis.svg"
     if [ -f "${app_dir}/aurora_borealis/assets/aurora-borealis.png" ]; then
@@ -124,7 +125,8 @@ Type=Application
 Name=Aurora Borealis
 GenericName=D&D 5e / 5.5e Character Builder
 Comment=Native D&D 5e / 5.5e Character & Companion Builder
-Exec="${app_dir}/aurora-borealis" --open %f
+Exec="${app_dir}/aurora-borealis" %f
+Path=${app_dir}
 TryExec=${app_dir}/aurora-borealis
 Icon=aurora-borealis
 Terminal=false

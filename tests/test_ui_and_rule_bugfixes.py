@@ -1529,6 +1529,97 @@ class UiAndRuleBugfixTests(unittest.TestCase):
             win.current_file = p / "dummy.dnd5e"
             win.close()
 
+    def test_15_pdf_word_wrap_range_fit_and_cli_open_args(self) -> None:
+        from PySide6.QtGui import QFont, QFontMetricsF
+        from PySide6.QtWidgets import QApplication
+
+        from aurora_borealis.main import _build_arg_parser
+        from aurora_borealis.pdf_export import _fit_text_layout, export_character_pdf
+        from aurora_borealis.platform_utils import is_windows
+
+        app = QApplication.instance() or QApplication([])
+        _ = app
+
+        font_family = "Arial" if is_windows() else "Sans Serif"
+
+        # 1. Word-boundary wrapping never breaks inside a word and shrinks for long words
+        sample = "• ExtraordinarilyLongFeatureName and normal companion traits"
+        pt, wrapped = _fit_text_layout(sample, w=90.0, h=60.0, size=7.5, wrap=True, min_size=4.0)
+        self.assertLessEqual(pt, 7.5)
+        self.assertEqual(" ".join(wrapped.split()), " ".join(sample.split()))
+        f = QFont(font_family)
+        f.setPointSizeF(pt)
+        fm = QFontMetricsF(f)
+        for line in wrapped.split("\n"):
+            self.assertLessEqual(fm.horizontalAdvance(line), 90.0)
+
+        # 2. Long 5.5e spell ranges fit in (41.9 x 16.5) with zero truncation or mid-word break
+        for rng in (
+            "Self (15-foot cone)",
+            "Self (30-foot sphere)",
+            "Self (10-foot-radius hemisphere)",
+            "150 feet",
+        ):
+            r_pt, r_txt = _fit_text_layout(rng, w=41.9, h=16.5, size=6.8, wrap=True, min_size=4.0)
+            self.assertEqual(" ".join(r_txt.split()), " ".join(rng.split()))
+            rf = QFont(font_family)
+            rf.setPointSizeF(r_pt)
+            rfm = QFontMetricsF(rf)
+            r_lines = r_txt.split("\n")
+            total_h = max(0, len(r_lines) - 1) * rfm.lineSpacing() + rfm.height()
+            self.assertLessEqual(total_h, 17.0, f"Range {rng!r} overflowed height at {r_pt}pt")
+            for rl in r_lines:
+                self.assertLessEqual(rfm.horizontalAdvance(rl), 41.9)
+
+        # 3. Single-line field shrinks instead of clipping
+        s_pt, s_txt = _fit_text_layout("Antidisestablishmentarianism", w=55.0, h=14.0, size=9.0, wrap=False)
+        self.assertEqual(s_txt, "Antidisestablishmentarianism")
+        sf = QFont(font_family)
+        sf.setPointSizeF(s_pt)
+        self.assertLessEqual(QFontMetricsF(sf).horizontalAdvance(s_txt), 55.0)
+
+        # 4. Full 5.5e PDF export with long range & long feature names succeeds cleanly
+        repo = self._make_repo()
+        sp = Element(
+            id="ID_SP_CONE",
+            name="Prismatic Cascade",
+            type="Spell",
+            supports=["Wizard"],
+            setters={"level": "1", "time": "1 bonus action", "range": "Self (15-foot cone)"},
+        )
+        feat = Element(
+            id="ID_FEAT_LONGWORD",
+            name="Supercalifragilisticexpialidocious",
+            type="Feat",
+        )
+        _populate_repo(repo, [*list(repo.by_id.values()), sp, feat])
+        st = CharacterState(
+            name="Elara",
+            ruleset="5.5e",
+            race_id="ID_RACE_HUMAN",
+            classes=[ClassLevel("ID_CLS_WIZ", 1)],
+            known_spells=["ID_SP_CONE"],
+            selections={"feat": ["ID_FEAT_LONGWORD"]},
+        )
+        st.sync_from_classes()
+        comp = RulesEngine(repo).evaluate(st)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_pdf = Path(tmp) / "out_55e.pdf"
+            export_character_pdf(st, comp, repo, out_pdf)
+            self.assertTrue(out_pdf.is_file())
+            self.assertTrue(out_pdf.read_bytes().startswith(b"%PDF"))
+
+        # 5. CLI parser handles Start Menu launches (--open with no arg, positional %f, or empty)
+        parser = _build_arg_parser()
+        a_empty = parser.parse_args([])
+        self.assertEqual((a_empty.open or a_empty.file or "").strip(), "")
+        a_legacy = parser.parse_args(["--open"])
+        self.assertEqual((a_legacy.open or a_legacy.file or "").strip(), "")
+        a_opt = parser.parse_args(["--open", "/tmp/hero.dnd5e"])
+        self.assertEqual((a_opt.open or a_opt.file or "").strip(), "/tmp/hero.dnd5e")
+        a_pos = parser.parse_args(["/tmp/hero.dnd55e"])
+        self.assertEqual((a_pos.open or a_pos.file or "").strip(), "/tmp/hero.dnd55e")
+
 
 if __name__ == "__main__":
     unittest.main()

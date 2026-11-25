@@ -713,6 +713,9 @@ class FeatureSuiteTests(unittest.TestCase):
             desk_txt = desk.read_text(encoding="utf-8")
             self.assertIn("application/x-dnd55e", desk_txt)
             self.assertIn("application/x-dndcomp", desk_txt)
+            self.assertIn("aurora-borealis\" %f", desk_txt)
+            self.assertNotIn("--open %f", desk_txt)
+            self.assertIn("Path=", desk_txt)
 
 
 if __name__ == "__main__":

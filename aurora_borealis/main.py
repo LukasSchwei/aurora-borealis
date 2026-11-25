@@ -57,8 +57,7 @@ def ensure_elements_extracted(
     return len(xml_files)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    configure_windows_app_id()
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Aurora Borealis — Cross-Platform (Linux & Windows) D&D 5e / 5.5e Character Builder"
     )
@@ -89,13 +88,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Disable automatic background sync of official Aurora Legacy GitHub content",
     )
-    parser.add_argument("--open", metavar="FILE", help="Open a .dnd5e character file on startup")
+    parser.add_argument(
+        "--open",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="FILE",
+        help="Open a .dnd5e / .dnd55e / .dndcomp file on startup",
+    )
+    parser.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="Optional .dnd5e / .dnd55e / .dndcomp file to open on startup",
+    )
     parser.add_argument(
         "--data-dir",
         default=str(get_elements_dir()),
         help="Directory for Aurora XML elements",
     )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    configure_windows_app_id()
+    parser = _build_arg_parser()
     args = parser.parse_args(argv)
+    open_target = (args.open or args.file or "").strip()
 
     elements_dir = Path(args.data_dir)
     custom_dir = get_custom_dir()
@@ -164,7 +183,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         repo=repo,
         data_dir=elements_dir,
         msi_path=DEFAULT_MSI_PATH if DEFAULT_MSI_PATH.is_file() else None,
-        initial_file=Path(args.open) if args.open else None,
+        initial_file=Path(open_target) if open_target else None,
         custom_dir=custom_dir,
         templates_dir=templates_dir,
         config=cfg,
