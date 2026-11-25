@@ -115,26 +115,38 @@ $VenvPy = Join-Path $VenvDir "Scripts\python.exe"
 & $VenvPy -m pip install -r (Join-Path $TargetDir "requirements.txt")
 & $VenvPy -m pip install --no-deps --no-build-isolation -e $TargetDir
 
-Write-Host "[4/5] Generating application icon (.ico) and shortcuts..."
+Write-Host "[4/5] Preparing application icon (.ico) and shortcuts..."
 $SvgPath = Join-Path $TargetDir "aurora_borealis\assets\aurora-borealis.svg"
 $IcoPath = Join-Path $TargetDir "aurora_borealis\assets\aurora-borealis.ico"
-if (Test-Path $SvgPath) {
+if (-not (Test-Path $IcoPath) -and (Test-Path $SvgPath)) {
     $IconGenScript = @'
 import struct, sys
 from PySide6.QtCore import QBuffer, QIODevice, Qt
-from PySide6.QtGui import QGuiApplication, QIcon
+from PySide6.QtGui import QGuiApplication, QImage, QPainter
+from PySide6.QtSvg import QSvgRenderer
 app = QGuiApplication.instance() or QGuiApplication([])
-icon = QIcon(sys.argv[1])
-pix = icon.pixmap(256, 256)
-if not pix.isNull():
-    buf = QBuffer()
-    buf.open(QIODevice.OpenModeFlag.WriteOnly)
-    pix.save(buf, "PNG")
-    png = bytes(buf.data())
-    header = struct.pack("<HHH", 0, 1, 1)
-    entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png), 6 + 16)
+renderer = QSvgRenderer(sys.argv[1])
+if renderer.isValid():
+    blobs = []
+    for sz in (16, 24, 32, 48, 64, 128, 256):
+        img = QImage(sz, sz, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        renderer.render(p)
+        p.end()
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG")
+        blobs.append((sz, bytes(buf.data())))
+    off = 6 + 16 * len(blobs)
+    dirs = []
+    for sz, b in blobs:
+        wb = 0 if sz >= 256 else sz
+        dirs.append(struct.pack("<BBBBHHII", wb, wb, 0, 0, 1, 32, len(b), off))
+        off += len(b)
     with open(sys.argv[2], "wb") as f:
-        f.write(header + entry + png)
+        f.write(struct.pack("<HHH", 0, 1, len(blobs)) + b"".join(dirs) + b"".join(b for _, b in blobs))
 '@
     & $VenvPy -c $IconGenScript $SvgPath $IcoPath
 }
@@ -201,8 +213,21 @@ Set-ItemProperty -Path $UninstallKey -Name "DisplayName" -Value "Aurora Borealis
 Set-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value "0.2.0"
 Set-ItemProperty -Path $UninstallKey -Name "Publisher" -Value "Aurora Borealis"
 Set-ItemProperty -Path $UninstallKey -Name "InstallLocation" -Value $TargetDir
-Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\setup-wizard-windows.ps1`" -InitialAction Uninstall"
+Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\setup-wizard-windows.ps1`" -InitialAction Uninstall"
 if (Test-Path $IcoPath) { Set-ItemProperty -Path $UninstallKey -Name "DisplayIcon" -Value "$IcoPath,0" }
+
+# Notify Windows Explorer to refresh shortcut & file association icon cache immediately
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class AuroraShellNotify {
+    [DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(int wEventId, int uFlags, IntPtr dwItem1, IntPtr dwItem2);
+}
+"@ -ErrorAction SilentlyContinue
+    [AuroraShellNotify]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
+} catch {}
 
 $InstalledPacks = @()
 if ($InstallAuroraLegacy) {

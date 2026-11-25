@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -742,10 +743,617 @@ def render_companion_sheet_html(comp: CompanionState, for_pdf: bool = False) -> 
     """
 
 
-def export_companion_pdf(comp: CompanionState, output_path: Path) -> None:
-    """Export a standalone printable Companion character sheet PDF."""
+_COMPANION_SPEED_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("walk", "Check Box8", "Text13"),
+    ("fly", "Check Box9", "Text14"),
+    ("swim", "Check Box10", "Text15"),
+    ("climb", "Check Box11", "Text16"),
+    ("burrow", "Check Box12", "Text17"),
+)
+
+_COMPANION_ABILITY_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("strength", "Text23", "Text24"),
+    ("dexterity", "Text22", "Text25"),
+    ("constitution", "Text21", "Text26"),
+    ("intelligence", "Text20", "Text27"),
+    ("wisdom", "Text19", "Text28"),
+    ("charisma", "Text18", "Text29"),
+)
+
+_COMPANION_SAVE_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("strength", "Check Box30.0", "Text31"),
+    ("dexterity", "Check Box30.1", "Text32"),
+    ("constitution", "Check Box30.2", "Text33"),
+    ("intelligence", "Check Box30.3", "Text34"),
+    ("wisdom", "Check Box30.4", "Text35"),
+    ("charisma", "Check Box30.5", "Text36"),
+)
+
+_COMPANION_DAMAGE_LEFT = (
+    "bludgeoning",
+    "piercing",
+    "slashing",
+    "cold",
+    "fire",
+    "poison",
+    "acid",
+)
+
+_COMPANION_DAMAGE_RIGHT = (
+    "psychic",
+    "necrotic",
+    "radiant",
+    "lightning",
+    "thunder",
+    "force",
+)
+
+_COMPANION_CONDITION_FIELDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("blind", "blinded"), "Check Box40.0"),
+    (("charm", "charmed"), "Check Box40.1"),
+    (("deafen", "deafened"), "Check Box40.2"),
+    (("frighten", "frightened"), "Check Box40.3"),
+    (("grapple", "grappled"), "Check Box40.4"),
+    (("incapacitate", "incapacitated"), "Check Box40.5"),
+    (("paralyze", "paralyzed"), "Check Box41.0"),
+    (("petrify", "petrified"), "Check Box41.1"),
+    (("poison", "poisoned"), "Check Box41.2"),
+    (("prone",), "Check Box41.3"),
+    (("restrain", "restrained"), "Check Box41.4"),
+    (("stun", "stunned"), "Check Box41.5"),
+)
+
+_COMPANION_SKILL_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("Acrobatics", "Check Box48.0.0", "Text70.0.0.0"),
+    ("Animal Handling", "Check Box48.1.0", "Text70.1.0.0"),
+    ("Arcana", "Check Box48.2.0", "Text70.2.0.0"),
+    ("Athletics", "Check Box48.3.0", "Text70.3.0.0"),
+    ("Deception", "Check Box48.4.0", "Text70.4.0.0"),
+    ("History", "Check Box48.5.0", "Text70.5.0.0"),
+    ("Insight", "Check Box48.0.1.0", "Text70.0.1"),
+    ("Intimidation", "Check Box48.1.1.0", "Text70.1.1"),
+    ("Investigation", "Check Box48.2.1.0", "Text70.2.1"),
+    ("Medicine", "Check Box48.3.1.0", "Text70.3.1"),
+    ("Nature", "Check Box48.4.1.0", "Text70.4.1"),
+    ("Perception", "Check Box48.5.1.0", "Text70.5.1"),
+    ("Performance", "Check Box48.0.1.1", "Text70.0.0.1"),
+    ("Persuasion", "Check Box48.1.1.1", "Text70.1.0.1"),
+    ("Religion", "Check Box48.2.1.1", "Text70.2.0.1"),
+    ("Sleight of Hand", "Check Box48.3.1.1", "Text70.3.0.1"),
+    ("Stealth", "Check Box48.4.1.1", "Text70.4.0.1"),
+    ("Survival", "Check Box48.5.1.1", "Text70.5.0.1"),
+)
+
+_COMPANION_SENSE_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("blindsight", "Check Box69.0", "Text50"),
+    ("darkvision", "Check Box69.1", "Text51"),
+    ("tremorsense", "Check Box69.2", "Text52"),
+    ("truesight", "Check Box69.3", "Text53"),
+)
+
+_COMPANION_ACTION_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("Text55.0", "Text56", "Text59"),
+    ("Text55.1", "Text57", "Text60"),
+    ("Text55.2", "Text58", "Text61"),
+)
+
+_SIZE_CARRY_MULTIPLIER: dict[str, float] = {
+    "tiny": 0.5,
+    "small": 1.0,
+    "medium": 1.0,
+    "large": 2.0,
+    "huge": 4.0,
+    "gargantuan": 8.0,
+}
+
+
+def _parse_companion_speeds(speed_text: str) -> dict[str, str]:
+    """Parse companion speed string into walk/fly/swim/climb/burrow entries."""
+    speeds: dict[str, str] = {}
+    for raw_part in re.split(r"[,;]", speed_text or ""):
+        part = raw_part.strip()
+        if not part:
+            continue
+        low = part.lower()
+        matched = False
+        for mode in ("fly", "swim", "climb", "burrow", "walk"):
+            if low.startswith(mode):
+                val = part[len(mode):].strip(" :")
+                speeds[mode] = val or part
+                matched = True
+                break
+        if not matched and re.match(r"^\d+", part):
+            speeds["walk"] = part
+    return speeds
+
+
+def _parse_companion_senses(senses_text: str) -> tuple[dict[str, str], list[str]]:
+    """Parse companion senses into standard PDF sense boxes plus any extra entries."""
+    parsed: dict[str, str] = {}
+    extra: list[str] = []
+    for raw_part in re.split(r"[,;]", senses_text or ""):
+        part = raw_part.strip()
+        if not part:
+            continue
+        low = part.lower()
+        if low.startswith("passive perception"):
+            continue
+        matched = False
+        for sense_key in ("blindsight", "darkvision", "tremorsense", "truesight"):
+            if low.startswith(sense_key):
+                val = part[len(sense_key):].strip(" :")
+                parsed[sense_key] = val or part
+                matched = True
+                break
+        if not matched:
+            extra.append(part)
+    return parsed, extra
+
+
+def _resolve_companion_pb_expr(expr: str, pb: int, spell_attack: int) -> str:
+    """Resolve scaling placeholders like 'Spell Attack' or '+3 + PB' into concrete values."""
+    text = (expr or "").strip()
+    if not text:
+        return ""
+    if text.lower() in ("spell attack", "your spell attack", "your spell attack modifier"):
+        return _fmt_signed(spell_attack)
+    if text.upper() == "PB":
+        return f"+{pb}"
+    text = re.sub(
+        r"\b(?:your\s+)?spell\s+attack(?:\s+modifier)?\b",
+        _fmt_signed(spell_attack),
+        text,
+        flags=re.IGNORECASE,
+    )
+    standalone = re.fullmatch(r"([+-]?\s*\d+)\s*\+\s*PB", text, flags=re.IGNORECASE)
+    if standalone:
+        base = int(standalone.group(1).replace(" ", ""))
+        return _fmt_signed(base + pb)
+    text = re.sub(
+        r"\+\s*(\d+)\s*\+\s*PB\b",
+        lambda m: f"+ {int(m.group(1)) + pb}",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bPB\b", str(pb), text, flags=re.IGNORECASE)
+    return text
+
+
+def _build_companion_field_map(
+    comp: CompanionState,
+) -> tuple[dict[str, str], set[str], dict[str, str], dict[str, int]]:
+    """Map CompanionState to the 164 AcroForm fields of companion_sheet.pdf."""
+    stats = compute_companion_stats(comp)
+    text: dict[str, str] = {}
+    checked: set[str] = set()
+    da_overrides: dict[str, str] = {}
+    ff_overrides: dict[str, int] = {}
+
+    owner_bonded = comp.owner_name.strip()
+    if owner_bonded and comp.owner_level > 0:
+        owner_bonded = f"{owner_bonded} (Lv {comp.owner_level})"
+
+    text["Text1"] = comp.name
+    text["Text2"] = comp.companion_type
+    text["Text4"] = owner_bonded
+    text["Text6"] = comp.size
+    text["Text7"] = comp.creature_type
+
+    speeds = _parse_companion_speeds(comp.speed)
+    for mode, chk_name, txt_name in _COMPANION_SPEED_FIELDS:
+        if mode in speeds:
+            checked.add(chk_name)
+            text[txt_name] = speeds[mode]
+
+    for ab, score_field, mod_field in _COMPANION_ABILITY_FIELDS:
+        score = int(comp.abilities.get(ab, 10))
+        mod = int(stats["mods"][ab])
+        text[score_field] = str(score)
+        text[mod_field] = _fmt_signed(mod)
+
+    save_profs = {s.strip().lower() for s in comp.saving_throw_profs}
+    for ab, chk_name, txt_name in _COMPANION_SAVE_FIELDS:
+        if ab in save_profs:
+            checked.add(chk_name)
+        text[txt_name] = _fmt_signed(int(stats["saves"][ab]))
+
+    text["Text43"] = str(stats["ac"])
+    text["Text46"] = (
+        f"{comp.current_hp} / {stats['max_hp']}"
+        if comp.current_hp != stats["max_hp"]
+        else str(stats["max_hp"])
+    )
+    if comp.temp_hp > 0:
+        text["Text47"] = str(comp.temp_hp)
+    text["Text37"] = _fmt_signed(int(stats["mods"]["dexterity"]))
+    text["Text42"] = str(stats["passive_perception"])
+
+    extra_load_notes: list[str] = []
+
+    if comp.damage_immunities.strip():
+        dmg_left_idx = {name: i for i, name in enumerate(_COMPANION_DAMAGE_LEFT)}
+        dmg_right_idx = {name: i for i, name in enumerate(_COMPANION_DAMAGE_RIGHT)}
+        for clause in re.split(r"[;\n]", comp.damage_immunities):
+            clause_clean = clause.strip()
+            if not clause_clean:
+                continue
+            low = clause_clean.lower()
+            col = 0
+            if "resist" in low:
+                col = 1
+            elif "vulnerab" in low:
+                col = 2
+            matched_any = False
+            for dtype, row in dmg_left_idx.items():
+                if re.search(rf"\b{dtype}\b", low):
+                    checked.add(f"Check Box38.{row}.{col}")
+                    matched_any = True
+            for dtype, row in dmg_right_idx.items():
+                if re.search(rf"\b{dtype}\b", low):
+                    checked.add(f"Check Box39.{row}.{col}")
+                    matched_any = True
+            if not matched_any:
+                extra_load_notes.append(f"Damage: {clause_clean}")
+
+    if comp.condition_immunities.strip():
+        cond_unmatched: list[str] = []
+        for raw_cond in re.split(r"[,;\n]", comp.condition_immunities):
+            cond = raw_cond.strip()
+            if not cond:
+                continue
+            low = cond.lower()
+            matched = False
+            for aliases, chk_name in _COMPANION_CONDITION_FIELDS:
+                if any(re.search(rf"\b{alias}\b", low) for alias in aliases):
+                    checked.add(chk_name)
+                    matched = True
+                    break
+            if not matched:
+                cond_unmatched.append(cond)
+        if cond_unmatched:
+            extra_load_notes.append(f"Condition Immunities: {', '.join(cond_unmatched)}")
+
+    skill_profs = {s.strip().lower() for s in comp.skill_profs}
+    for skill_name, chk_name, txt_name in _COMPANION_SKILL_FIELDS:
+        if skill_name.lower() in skill_profs:
+            checked.add(chk_name)
+        if skill_name in stats["skills"]:
+            text[txt_name] = _fmt_signed(int(stats["skills"][skill_name]))
+
+    senses_map, extra_senses = _parse_companion_senses(comp.senses)
+    for sense_key, chk_name, txt_name in _COMPANION_SENSE_FIELDS:
+        if sense_key in senses_map:
+            checked.add(chk_name)
+            text[txt_name] = senses_map[sense_key]
+    if extra_senses:
+        extra_load_notes.append(f"Senses: {', '.join(extra_senses)}")
+
+    str_score = int(comp.abilities.get("strength", 10))
+    size_mult = _SIZE_CARRY_MULTIPLIER.get((comp.size or "medium").strip().lower(), 1.0)
+    carry_cap = int(round(str_score * 15 * size_mult))
+    text["Text63"] = f"{carry_cap} lb."
+
+    pb = int(stats["proficiency"])
+    cr_display = _resolve_companion_pb_expr(comp.cr or "—", pb, comp.owner_spell_attack)
+    load_lines = [
+        f"PB: +{pb} | CR: {cr_display} | Hit Dice: {comp.hit_dice or '—'}",
+    ]
+    if comp.languages.strip():
+        load_lines.append(f"Languages: {comp.languages.strip()}")
+    load_lines.extend(extra_load_notes)
+    if comp.notes.strip():
+        load_lines.append(f"Notes: {comp.notes.strip()}")
+    text["Text67"] = "\n".join(load_lines)
+
+    atk_actions = [a for a in comp.actions if a.attack_bonus.strip() or a.damage.strip()]
+    other_actions = [a for a in comp.actions if a not in atk_actions]
+    table_actions = (atk_actions + other_actions)[:3]
+    for idx, act in enumerate(table_actions):
+        name_f, atk_f, dmg_f = _COMPANION_ACTION_ROWS[idx]
+        text[name_f] = act.name
+        text[atk_f] = _resolve_companion_pb_expr(act.attack_bonus, pb, comp.owner_spell_attack)
+        text[dmg_f] = _resolve_companion_pb_expr(act.damage, pb, comp.owner_spell_attack)
+
+    action_blocks: list[str] = []
+    for act in comp.actions:
+        atk = _resolve_companion_pb_expr(act.attack_bonus, pb, comp.owner_spell_attack)
+        dmg = _resolve_companion_pb_expr(act.damage, pb, comp.owner_spell_attack)
+        desc = _resolve_companion_pb_expr(act.description, pb, comp.owner_spell_attack)
+        meta_parts = [p for p in (atk, dmg) if p]
+        meta = f" ({', '.join(meta_parts)})" if meta_parts else ""
+        action_blocks.append(f"{act.name}{meta}: {desc}" if desc else f"{act.name}{meta}")
+    if action_blocks:
+        text["Text68"] = "\n\n".join(action_blocks)
+
+    trait_blocks = [
+        f"{t.name}. {t.description}" if t.description else t.name
+        for t in comp.traits
+    ]
+    if trait_blocks:
+        text["Text54"] = "\n\n".join(trait_blocks)
+
+    # Consistent font sizing & flags across compact boxes vs multiline panels
+    single_line_da = {
+        "Text1": "/Helv 14 Tf 0 g",
+        "Text2": "/Helv 9 Tf 0 g",
+        "Text3": "/Helv 9 Tf 0 g",
+        "Text4": "/Helv 9 Tf 0 g",
+        "Text5": "/Helv 9 Tf 0 g",
+        "Text6": "/Helv 9 Tf 0 g",
+        "Text7": "/Helv 9 Tf 0 g",
+        "Text37": "/Helv 15 Tf 0 g",
+        "Text42": "/Helv 10 Tf 0 g",
+        "Text43": "/Helv 14 Tf 0 g",
+        "Text46": "/Helv 13 Tf 0 g",
+        "Text47": "/Helv 13 Tf 0 g",
+    }
+    for _ab, score_f, mod_f in _COMPANION_ABILITY_FIELDS:
+        single_line_da[score_f] = "/Helv 14 Tf 0 g"
+        single_line_da[mod_f] = "/Helv 6.5 Tf 0 g"
+    for fname in (
+        "Text13", "Text14", "Text15", "Text16", "Text17",
+        "Text31", "Text32", "Text33", "Text34", "Text35", "Text36",
+        "Text50", "Text51", "Text52", "Text53",
+        "Text62", "Text63", "Text64", "Text65", "Text66",
+    ):
+        single_line_da[fname] = "/Helv 7.5 Tf 0 g"
+    for _sk, _chk, txt_f in _COMPANION_SKILL_FIELDS:
+        single_line_da[txt_f] = "/Helv 7.5 Tf 0 g"
+    for name_f, atk_f, dmg_f in _COMPANION_ACTION_ROWS:
+        act_name = text.get(name_f, "")
+        if len(act_name) > 22:
+            single_line_da[name_f] = "/Helv 4.6 Tf 0 g"
+        elif len(act_name) > 17:
+            single_line_da[name_f] = "/Helv 5.1 Tf 0 g"
+        elif len(act_name) > 13:
+            single_line_da[name_f] = "/Helv 6.0 Tf 0 g"
+        else:
+            single_line_da[name_f] = "/Helv 7.5 Tf 0 g"
+        single_line_da[atk_f] = "/Helv 7.5 Tf 0 g"
+        single_line_da[dmg_f] = "/Helv 7.5 Tf 0 g"
+
+    for fname, da in single_line_da.items():
+        da_overrides[fname] = da
+        ff_overrides[fname] = 0  # Clear multiline flag so viewers vertically center single-line text
+
+    for fname in ("Text54", "Text67", "Text68"):
+        da_overrides[fname] = "/Helv 7.5 Tf 0 g"
+        ff_overrides[fname] = 4096  # Multiline flag (1 << 12), scrollable
+
+    return text, checked, da_overrides, ff_overrides
+
+
+def _collect_companion_checkbox_rects(
+    template_pdf: Path,
+) -> dict[str, tuple[float, float, float, float]]:
+    """Extract (x, y_top, w, h) in 72-dpi page coordinates for all checkboxes on companion_sheet.pdf."""
+    import json
+    import subprocess
+    from .platform_utils import find_executable, subprocess_no_window_kwargs
+
+    rects: dict[str, tuple[float, float, float, float]] = {}
+    qpdf_exe = find_executable("qpdf")
+    if qpdf_exe:
+        try:
+            probe = subprocess.run(
+                [qpdf_exe, "--json", "--json-key=acroform", "--json-key=pages", "--json-key=qpdf", str(template_pdf)],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+                **subprocess_no_window_kwargs(),
+            )
+            if probe.returncode in (0, 3):
+                pdata = json.loads(probe.stdout)
+                pobjs = pdata["qpdf"][1]
+                for f in pdata.get("acroform", {}).get("fields", []):
+                    fn = f.get("fullname", "")
+                    if not fn.startswith("Check Box"):
+                        continue
+                    v = pobjs.get(f"obj:{f.get('object', '')}", {}).get("value", {})
+                    r = v.get("/Rect")
+                    if r and len(r) == 4:
+                        rects[fn] = (
+                            float(r[0]),
+                            792.0 - float(r[3]),
+                            float(r[2]) - float(r[0]),
+                            float(r[3]) - float(r[1]),
+                        )
+                return rects
+        except Exception:
+            pass
+
+    try:
+        from pypdf import PdfReader
+        from .pdf_export import _pypdf_annot_fullname
+
+        reader = PdfReader(str(template_pdf))
+        if reader.pages:
+            for annot_ref in reader.pages[0].get("/Annots") or []:
+                annot = annot_ref.get_object()
+                fn = _pypdf_annot_fullname(annot)
+                if not fn.startswith("Check Box"):
+                    continue
+                r = annot.get("/Rect")
+                if r and len(r) == 4:
+                    rects[fn] = (
+                        float(r[0]),
+                        792.0 - float(r[3]),
+                        float(r[2]) - float(r[0]),
+                        float(r[3]) - float(r[1]),
+                    )
+    except Exception:
+        pass
+    return rects
+
+
+def _make_companion_checkboxes_transparent(filled_pdf: Path) -> None:
+    """Clear opaque white /MK /BG fills and /AP streams on checkboxes so vector overlay checkmarks stay visible."""
+    import json
+    import subprocess
+    import tempfile
+    from .platform_utils import find_executable, subprocess_no_window_kwargs
+
+    qpdf_exe = find_executable("qpdf")
+    if qpdf_exe:
+        probe = subprocess.run(
+            [
+                qpdf_exe,
+                "--json",
+                "--json-stream-data=inline",
+                "--json-key=acroform",
+                "--json-key=qpdf",
+                str(filled_pdf),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            **subprocess_no_window_kwargs(),
+        )
+        if probe.returncode in (0, 3):
+            data = json.loads(probe.stdout)
+            objs = data["qpdf"][1]
+            for f in data.get("acroform", {}).get("fields", []):
+                if not f.get("fullname", "").startswith("Check Box"):
+                    continue
+                val_dict = objs.get(f"obj:{f.get('object', '')}", {}).get("value")
+                if isinstance(val_dict, dict):
+                    val_dict.pop("/MK", None)
+                    val_dict.pop("/AP", None)
+                    val_dict.pop("/DA", None)
+            with tempfile.TemporaryDirectory(prefix="aurora_comp_mk_") as tmpdir:
+                jp = Path(tmpdir) / "transparent.json"
+                out_tmp = Path(tmpdir) / "transparent.pdf"
+                jp.write_text(json.dumps({"qpdf": data["qpdf"]}), encoding="utf-8")
+                res = subprocess.run(
+                    [qpdf_exe, "--json-input", str(jp), str(out_tmp)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    **subprocess_no_window_kwargs(),
+                )
+                if res.returncode in (0, 3) and out_tmp.is_file():
+                    filled_pdf.write_bytes(out_tmp.read_bytes())
+        return
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+        from .pdf_export import _pypdf_annot_fullname
+
+        reader = PdfReader(str(filled_pdf))
+        writer = PdfWriter(clone_from=reader)
+        for page in writer.pages:
+            for annot_ref in page.get("/Annots") or []:
+                annot = annot_ref.get_object()
+                if _pypdf_annot_fullname(annot).startswith("Check Box"):
+                    for key in ("/MK", "/AP", "/DA"):
+                        if key in annot:
+                            del annot[key]
+        with tempfile.TemporaryDirectory(prefix="aurora_comp_mk_") as tmpdir:
+            out_tmp = Path(tmpdir) / "transparent.pdf"
+            with out_tmp.open("wb") as fh:
+                writer.write(fh)
+            filled_pdf.write_bytes(out_tmp.read_bytes())
+    except Exception:
+        pass
+
+
+def _overlay_companion_checkboxes(
+    filled_pdf: Path,
+    template_pdf: Path,
+    checked: set[str],
+    output_path: Path,
+) -> None:
+    """Draw crisp square checkbox borders and checkmarks onto page 1 for cross-viewer clarity."""
+    import subprocess
+    import tempfile
+    from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt
+    from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+    from .pdf_export import _overlay_pdf_pypdf
+    from .platform_utils import find_executable, subprocess_no_window_kwargs
+
+    rects = _collect_companion_checkbox_rects(template_pdf)
+    if not rects:
+        if filled_pdf.resolve() != output_path.resolve():
+            output_path.write_bytes(filled_pdf.read_bytes())
+        return
+
+    _make_companion_checkboxes_transparent(filled_pdf)
+
+    with tempfile.TemporaryDirectory(prefix="aurora_comp_chk_") as tmpdir:
+        overlay_pdf = Path(tmpdir) / "chk_overlay.pdf"
+        writer = QPdfWriter(str(overlay_pdf))
+        writer.setResolution(72)
+        writer.setPageSize(QPageSize(QSizeF(612, 792), QPageSize.Unit.Point))
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Point)
+        painter = QPainter(writer)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            box_pen = QPen(QColor("#1f2937"), 0.8)
+            box_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+            chk_pen = QPen(QColor("#111827"), 1.35)
+            chk_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            chk_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+            for fn, (rx, ry, rw, rh) in rects.items():
+                painter.setPen(box_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(QRectF(rx + 0.45, ry + 0.45, max(1.0, rw - 0.9), max(1.0, rh - 0.9)))
+                if fn in checked:
+                    path = QPainterPath()
+                    path.moveTo(QPointF(rx + rw * 0.21, ry + rh * 0.54))
+                    path.lineTo(QPointF(rx + rw * 0.43, ry + rh * 0.76))
+                    path.lineTo(QPointF(rx + rw * 0.80, ry + rh * 0.24))
+                    painter.setPen(chk_pen)
+                    painter.drawPath(path)
+        finally:
+            painter.end()
+
+        qpdf_exe = find_executable("qpdf")
+        if qpdf_exe:
+            res = subprocess.run(
+                [qpdf_exe, str(filled_pdf), "--overlay", str(overlay_pdf), "--", str(output_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                **subprocess_no_window_kwargs(),
+            )
+            if res.returncode not in (0, 3) or not output_path.is_file():
+                raise RuntimeError(f"qpdf --overlay (companion checkboxes) failed: {res.stderr.strip()}")
+        else:
+            _overlay_pdf_pypdf(filled_pdf, overlay_pdf, output_path)
+
+
+def export_companion_pdf(
+    comp: CompanionState,
+    output_path: Path,
+    templates_dir: Optional[Path] = None,
+) -> None:
+    """Export a standalone printable Companion character sheet PDF (using bundled official AcroForm sheet)."""
+    import tempfile
+    from .pdf_export import _can_use_pdf_tools, _resolve_template_pdf, fill_pdf_form_qpdf
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if _can_use_pdf_tools():
+        tpl = _resolve_template_pdf("companion_sheet.pdf", templates_dir)
+        if tpl is not None:
+            text_fields, checked, da_overrides, ff_overrides = _build_companion_field_map(comp)
+            with tempfile.TemporaryDirectory(prefix="aurora_comp_fill_") as tmpdir:
+                filled_tmp = Path(tmpdir) / "filled.pdf"
+                fill_pdf_form_qpdf(
+                    tpl,
+                    text_fields,
+                    checked,
+                    filled_tmp,
+                    field_da_overrides=da_overrides,
+                    field_ff_overrides=ff_overrides,
+                )
+                _overlay_companion_checkboxes(filled_tmp, tpl, checked, output_path)
+            return
+
+    # Fallback HTML export if template PDF or qpdf/pypdf is unavailable
     writer = QPdfWriter(str(output_path))
     writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
     writer.setPageMargins(QMarginsF(14, 14, 14, 14), QPageLayout.Unit.Millimeter)

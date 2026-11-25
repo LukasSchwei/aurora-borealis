@@ -135,20 +135,41 @@ def _fmt_mod(val: int) -> str:
     return f"+{val}" if val >= 0 else str(val)
 
 
+def _pypdf_annot_fullname(annot) -> str:
+    """Resolve the hierarchical AcroForm fullname of a pypdf annotation widget."""
+    parts: list[str] = []
+    cur = annot
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        t = cur.get("/T")
+        if t is not None and str(t):
+            parts.append(str(t))
+        parent = cur.get("/Parent")
+        if parent is None:
+            break
+        cur = parent.get_object() if hasattr(parent, "get_object") else parent
+    return ".".join(reversed(parts))
+
+
 def _fill_pdf_form_pypdf(
     template_pdf: Path,
     text_fields: dict[str, str],
     checkbox_fields: set[str],
     output_path: Path,
+    field_da_overrides: Optional[dict[str, str]] = None,
+    field_ff_overrides: Optional[dict[str, int]] = None,
 ) -> None:
     """Pure-Python AcroForm fallback using pypdf when qpdf is not installed (e.g. Windows)."""
     from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import BooleanObject, NameObject
+    from pypdf.generic import BooleanObject, NameObject, NumberObject, TextStringObject
 
     reader = PdfReader(str(template_pdf))
     writer = PdfWriter(clone_from=reader)
     text_lookup = {k: v for k, v in text_fields.items()}
     text_stripped = {k.strip(): v for k, v in text_fields.items()}
+    da_map = field_da_overrides or {}
+    ff_map = field_ff_overrides or {}
 
     if "/AcroForm" in writer._root_object:
         acro = writer._root_object["/AcroForm"].get_object()
@@ -160,18 +181,29 @@ def _fill_pdf_form_pypdf(
             continue
         for annot_ref in annots:
             annot = annot_ref.get_object()
-            fname = str(annot.get("/T") or "")
-            if not fname:
-                parent = annot.get("/Parent")
-                if parent is not None:
-                    fname = str(parent.get_object().get("/T") or "")
+            fname = _pypdf_annot_fullname(annot)
             if not fname:
                 continue
             if fname in text_lookup or fname.strip() in text_stripped:
-                from pypdf.generic import TextStringObject
-
                 txt = text_lookup.get(fname, text_stripped.get(fname.strip(), ""))
                 annot[NameObject("/V")] = TextStringObject(txt)
+                da_val = da_map.get(fname) or da_map.get(fname.strip())
+                if da_val:
+                    annot[NameObject("/DA")] = TextStringObject(da_val)
+                elif fname.strip() in (
+                    "Features and Traits",
+                    "Feat+Traits",
+                    "Equipment",
+                    "ProficienciesLang",
+                    "Backstory",
+                    "Allies",
+                ):
+                    annot[NameObject("/DA")] = TextStringObject("/Helv 8 Tf 0 g")
+                ff_val = ff_map.get(fname)
+                if ff_val is None:
+                    ff_val = ff_map.get(fname.strip())
+                if ff_val is not None:
+                    annot[NameObject("/Ff")] = NumberObject(int(ff_val))
                 if "/AP" in annot:
                     del annot["/AP"]
             elif fname in checkbox_fields:
@@ -208,15 +240,26 @@ def fill_pdf_form_qpdf(
     text_fields: dict[str, str],
     checkbox_fields: set[str],
     output_path: Path,
+    field_da_overrides: Optional[dict[str, str]] = None,
+    field_ff_overrides: Optional[dict[str, int]] = None,
 ) -> None:
     """Populate AcroForm fields in a fillable PDF using qpdf JSON round-trip (or pypdf fallback)."""
     template_pdf = Path(template_pdf)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    da_map = field_da_overrides or {}
+    ff_map = field_ff_overrides or {}
 
     qpdf_exe = find_executable("qpdf")
     if not qpdf_exe:
-        _fill_pdf_form_pypdf(template_pdf, text_fields, checkbox_fields, output_path)
+        _fill_pdf_form_pypdf(
+            template_pdf,
+            text_fields,
+            checkbox_fields,
+            output_path,
+            field_da_overrides=da_map,
+            field_ff_overrides=ff_map,
+        )
         return
 
     probe = subprocess.run(
@@ -268,7 +311,10 @@ def fill_pdf_form_qpdf(
         if fullname in text_lookup or fullname.strip() in text_stripped:
             txt = text_lookup.get(fullname, text_stripped.get(fullname.strip(), ""))
             val_dict["/V"] = f"u:{txt}"
-            if fullname in (
+            da_val = da_map.get(fullname) or da_map.get(fullname.strip())
+            if da_val:
+                val_dict["/DA"] = da_val if da_val.startswith(("u:", "b:")) else f"u:{da_val}"
+            elif fullname in (
                 "Features and Traits",
                 "Feat+Traits",
                 "Equipment",
@@ -276,7 +322,12 @@ def fill_pdf_form_qpdf(
                 "Backstory",
                 "Allies",
             ):
-                val_dict["/DA"] = "/Helv 8 Tf 0 g"
+                val_dict["/DA"] = "u:/Helv 8 Tf 0 g"
+            ff_val = ff_map.get(fullname)
+            if ff_val is None:
+                ff_val = ff_map.get(fullname.strip())
+            if ff_val is not None:
+                val_dict["/Ff"] = int(ff_val)
             val_dict.pop("/AP", None)
         elif fullname in chk_lookup:
             on_state = "/Yes"
@@ -739,19 +790,18 @@ def _get_pdf_page_size(pdf_path: Path) -> tuple[float, float]:
                             return w, h
         except Exception:
             pass
-    else:
-        try:
-            from pypdf import PdfReader
+    try:
+        from pypdf import PdfReader
 
-            reader = PdfReader(str(pdf_path))
-            if reader.pages:
-                box = reader.pages[0].cropbox or reader.pages[0].mediabox
-                w = float(box.width)
-                h = float(box.height)
-                if w > 100 and h > 100:
-                    return w, h
-        except Exception:
-            pass
+        reader = PdfReader(str(pdf_path))
+        if reader.pages:
+            box = reader.pages[0].cropbox or reader.pages[0].mediabox
+            w = float(box.width)
+            h = float(box.height)
+            if w > 100 and h > 100:
+                return w, h
+    except Exception:
+        pass
     return 612.0, 792.0
 
 
@@ -773,9 +823,11 @@ def export_55e_overlay_pdf(
     align_el = repo.get(state.alignment_id)
 
     tpl_w, tpl_h = _get_pdf_page_size(template_pdf)
-    # Official 2024 sheet is 612 x 792 pt; if a cropped copy is used, center-offset cleanly.
-    off_x = (tpl_w - 612.0) / 2.0
-    off_y = (tpl_h - 792.0) / 2.0
+    # Scale uniformly from the 612x792 coordinate system into tpl_w x tpl_h (e.g. 603x774)
+    # so the overlay vector page matches the template MediaBox size cleanly with zero drift.
+    scale = min(tpl_w / 612.0, tpl_h / 792.0)
+    off_x = (tpl_w - 612.0 * scale) / 2.0
+    off_y = (tpl_h - 792.0 * scale) / 2.0
 
     with tempfile.TemporaryDirectory(prefix="aurora_55e_") as tmpdir:
         overlay_pdf = Path(tmpdir) / "overlay.pdf"
@@ -787,6 +839,7 @@ def export_55e_overlay_pdf(
         painter = QPainter(writer)
         try:
             painter.translate(off_x, off_y)
+            painter.scale(scale, scale)
 
             # --- PAGE 1 (612 x 792 pt official 2024 sheet coordinates) ---
             _draw_text(painter, 26.6, 15.0, 221.5, 14.9, state.name or "", size=10.5, bold=True)
@@ -943,7 +996,7 @@ def export_55e_overlay_pdf(
                     painter.save()
                     painter.setBrush(QColor("#111827"))
                     painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QRectF(dot_x + 0.8, sv_dot_y + 2.0, 5.2, 5.2))
+                    painter.drawEllipse(QRectF(dot_x + 0.8, sv_dot_y + 2.6, 5.2, 5.2))
                     painter.restore()
                 _draw_text(
                     painter, val_x, sv_val_y + 1.5, 17.4, 13.0, _fmt_mod(sv.bonus),
@@ -956,7 +1009,7 @@ def export_55e_overlay_pdf(
                         painter.save()
                         painter.setBrush(QColor("#111827"))
                         painter.setPen(Qt.PenStyle.NoPen)
-                        painter.drawEllipse(QRectF(dot_x + 0.8, sk_dot_y + 2.0, 5.2, 5.2))
+                        painter.drawEllipse(QRectF(dot_x + 0.8, sk_dot_y + 2.6, 5.2, 5.2))
                         painter.restore()
                     _draw_text(
                         painter, val_x, sk_val_y + 1.5, 17.4, 13.0, _fmt_mod(sk.bonus),
@@ -978,7 +1031,7 @@ def export_55e_overlay_pdf(
                     painter.save()
                     painter.setBrush(QColor("#111827"))
                     painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QRectF(dx + 1.4, dy + 1.8, 5.2, 5.2))
+                    painter.drawEllipse(QRectF(dx - 0.3, dy + 1.2, 5.2, 5.2))
                     painter.restore()
 
             clean_profs = [
@@ -1045,10 +1098,11 @@ def export_55e_overlay_pdf(
             _draw_text(painter, 232.4, 606.2, 163.6, 164.1, spc_feats, size=7.5, wrap=True, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             _draw_text(painter, 419.1, 605.5, 176.2, 165.4, feats_txt, size=7.5, wrap=True, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-            # --- PAGE 2 (612 x 792 pt official 2024 sheet coordinates) ---
+            # --- PAGE 2 (612 x 792 pt official 2024 sheet coordinates scaled to template) ---
             writer.newPage()
             painter.resetTransform()
             painter.translate(off_x, off_y)
+            painter.scale(scale, scale)
 
             if computed.spellcasting:
                 sc = computed.spellcasting
@@ -1150,7 +1204,7 @@ def export_55e_overlay_pdf(
                 painter.save()
                 painter.setBrush(QColor("#111827"))
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(QRectF(425.6, ay + 6.0, 5.0, 5.0))
+                painter.drawEllipse(QRectF(427.2, ay + 6.5, 5.0, 5.0))
                 painter.restore()
                 _draw_text(painter, 437.8, ay, 156.2, 16.5, aname, size=7.8)
 
@@ -1328,6 +1382,26 @@ def export_character_pdf(
                                     v = pobjs.get(f"obj:{f.get('object', '')}", {}).get("value", {})
                                     rect = v.get("/Rect")
                                     if rect and pmap.get(v.get("/P", ""), 0) == 3:
+                                        prep_rects.append((
+                                            float(rect[0]),
+                                            792.0 - float(rect[3]),
+                                            float(rect[2]) - float(rect[0]),
+                                            float(rect[3]) - float(rect[1]),
+                                        ))
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        from pypdf import PdfReader
+
+                        reader = PdfReader(str(tpl))
+                        if len(reader.pages) >= 3:
+                            for annot_ref in reader.pages[2].get("/Annots") or []:
+                                annot = annot_ref.get_object()
+                                fn = str(annot.get("/T") or "")
+                                if fn in checked:
+                                    rect = annot.get("/Rect")
+                                    if rect:
                                         prep_rects.append((
                                             float(rect[0]),
                                             792.0 - float(rect[3]),

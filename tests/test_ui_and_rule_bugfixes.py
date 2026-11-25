@@ -926,6 +926,225 @@ class UiAndRuleBugfixTests(unittest.TestCase):
             self.assertFalse(cfg_dir.exists())
             self.assertTrue(char_file.is_file(), "Saved characters in Documents must be preserved!")
 
+    def test_10_bundled_icons_pdf_templates_55e_alignment_and_windows_wizard_safety(self) -> None:
+        import json
+        import struct
+        import subprocess
+        from PySide6.QtGui import QIcon
+        from PySide6.QtWidgets import QApplication
+        from aurora_borealis.models import InventoryItem
+        from aurora_borealis.pdf_export import (
+            _get_pdf_page_size,
+            _resolve_template_pdf,
+            export_character_pdf,
+        )
+
+        app = QApplication.instance() or QApplication([])
+        root_dir = Path(__file__).resolve().parent.parent
+        assets_dir = root_dir / "aurora_borealis" / "assets"
+
+        # 1. Valid multi-resolution .ico + 256x256 .png bundled
+        ico_path = assets_dir / "aurora-borealis.ico"
+        png_path = assets_dir / "aurora-borealis.png"
+        self.assertTrue(ico_path.is_file())
+        self.assertTrue(png_path.is_file())
+        ico_bytes = ico_path.read_bytes()
+        reserved, ico_type, count = struct.unpack("<HHH", ico_bytes[:6])
+        self.assertEqual((reserved, ico_type), (0, 1))
+        self.assertGreaterEqual(count, 5)
+        self.assertFalse(QIcon(str(ico_path)).isNull())
+
+        # 2. Official 5e & 5.5e PDF templates bundled & resolved even with an empty user templates_dir
+        with tempfile.TemporaryDirectory() as empty_tpl:
+            tpl_5e = _resolve_template_pdf("dnd5e_sheet.pdf", Path(empty_tpl))
+            tpl_55e = _resolve_template_pdf("dnd55e_sheet.pdf", Path(empty_tpl))
+            self.assertIsNotNone(tpl_5e)
+            self.assertIsNotNone(tpl_55e)
+            assert tpl_5e is not None and tpl_55e is not None
+            self.assertTrue(tpl_5e.is_file())
+            self.assertTrue(tpl_55e.is_file())
+
+            repo = self._make_repo()
+            _populate_repo(
+                repo,
+                [
+                    Element(id="ID_RACE_ELF", name="High Elf", type="Race"),
+                    Element(id="ID_ALIGN_NG", name="Neutral Good", type="Alignment"),
+                    Element(id="ID_FEAT_ALERT", name="Alert", type="Feat"),
+                    Element(
+                        id="ID_WPN_STAFF",
+                        name="Quarterstaff",
+                        type="Weapon",
+                        setters={"damage": "1d6", "damage_type": "bludgeoning"},
+                    ),
+                ],
+            )
+            engine = RulesEngine(repo)
+
+            # 3. Export 5e & 5.5e using bundled templates (NOT 1-page HTML fallback!)
+            st_5e = CharacterState(
+                name="Aldric 5e",
+                ruleset="5e",
+                race_id="ID_RACE_ELF",
+                class_id="ID_CLS_WIZ",
+                background_id="ID_BG_SAGE",
+                alignment_id="ID_ALIGN_NG",
+                classes=[ClassLevel("ID_CLS_WIZ", 5)],
+                level=5,
+                known_spells=["ID_SP_C_0", "ID_SP_L1_0"],
+                prepared_spells=["ID_SP_L1_0"],
+            )
+            st_5e.sync_from_classes()
+            out_5e = Path(empty_tpl) / "aldric_5e.pdf"
+            export_character_pdf(st_5e, engine.evaluate(st_5e), repo, out_5e, templates_dir=Path(empty_tpl))
+            self.assertTrue(out_5e.is_file())
+            p5e = subprocess.run(
+                ["qpdf", "--json", "--json-key=pages", "--json-key=acroform", "--json-key=qpdf", str(out_5e)],
+                capture_output=True, text=True, check=True,
+            )
+            d5e = json.loads(p5e.stdout)
+            self.assertEqual(len(d5e.get("pages", [])), 3)
+            objs5e = d5e["qpdf"][1]
+            vals5e = {
+                f.get("fullname", ""): objs5e.get("obj:" + f["object"], {}).get("value", {}).get("/V")
+                for f in d5e.get("acroform", {}).get("fields", [])
+            }
+            self.assertEqual(vals5e.get("CharacterName"), "u:Aldric 5e")
+
+            st_55e = CharacterState(
+                name="Elara 55e",
+                ruleset="5.5e",
+                race_id="ID_RACE_ELF",
+                class_id="ID_CLS_WIZ",
+                background_id="ID_BG_SAGE",
+                alignment_id="ID_ALIGN_NG",
+                classes=[ClassLevel("ID_CLS_WIZ", 5)],
+                level=5,
+                xp=6500,
+                background_asi={"intelligence": 2, "constitution": 1},
+                inventory=[InventoryItem(element_id="ID_WPN_STAFF", name="Quarterstaff", category="Weapon")],
+                known_spells=["ID_SP_C_0", "ID_SP_L1_0"],
+                prepared_spells=["ID_SP_L1_0"],
+            )
+            st_55e.sync_from_classes()
+            out_55e = Path(empty_tpl) / "elara_55e.pdf"
+            export_character_pdf(st_55e, engine.evaluate(st_55e), repo, out_55e, templates_dir=Path(empty_tpl))
+            self.assertTrue(out_55e.is_file())
+            p55e = subprocess.run(
+                ["qpdf", "--json", "--json-key=pages", str(out_55e)],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(len(json.loads(p55e.stdout).get("pages", [])), 2)
+            w_55e, h_55e = _get_pdf_page_size(out_55e)
+            self.assertAlmostEqual(w_55e, 603.0, delta=1.0)
+            self.assertAlmostEqual(h_55e, 774.0, delta=1.0)
+
+        # 4. Windows Setup Wizard & Installer PowerShell 5.1 safety checks
+        wiz_bytes = (root_dir / "setup-wizard-windows.ps1").read_bytes()
+        wiz_body = wiz_bytes.removeprefix(b"\xef\xbb\xbf")
+        self.assertTrue(all(b < 128 for b in wiz_body), "setup-wizard-windows.ps1 body must stay pure ASCII for PS 5.1")
+        wiz_txt = wiz_body.decode("ascii")
+        self.assertIn("System.Windows.Forms.Timer", wiz_txt)
+        self.assertIn("Start-Process", wiz_txt)
+        self.assertNotIn("add_OutputDataReceived", wiz_txt)
+        self.assertNotIn("BeginInvoke", wiz_txt)
+        self.assertIn("-STA", (root_dir / "setup-wizard-windows.bat").read_text(encoding="ascii"))
+
+        inst_ps1 = (root_dir / "install-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("-not (Test-Path $IcoPath)", inst_ps1)
+        self.assertIn("SHChangeNotify", inst_ps1)
+
+    def test_11_companion_sheet_official_acroform_pdf_export(self) -> None:
+        import json
+        import subprocess
+        from pathlib import Path
+        from PySide6.QtWidgets import QApplication
+        from aurora_borealis.companions import create_companion_from_template, export_companion_pdf
+        from aurora_borealis.models import CharacterState, ClassLevel
+        from aurora_borealis.pdf_export import _get_pdf_page_size, _pypdf_annot_fullname, _resolve_template_pdf
+
+        QApplication.instance() or QApplication([])
+
+        with tempfile.TemporaryDirectory() as empty_tpl:
+            tpl_comp = _resolve_template_pdf("companion_sheet.pdf", Path(empty_tpl))
+            self.assertIsNotNone(tpl_comp)
+            assert tpl_comp is not None
+            self.assertTrue(tpl_comp.is_file())
+
+            owner = CharacterState(name="Seraphina", ruleset="5e", level=7, classes=[ClassLevel("ID_CLS", 7)])
+            comp = create_companion_from_template("steel_defender", owner)
+            comp.owner_proficiency = 3
+            comp.owner_spell_attack = 7
+            comp.owner_ability_mod = 4
+            comp.speed = "40 ft., climb 20 ft., fly 30 ft."
+            comp.senses = "Darkvision 60 ft., Blindsight 10 ft., passive Perception 14"
+            comp.skill_profs = ["Athletics", "Perception", "Stealth"]
+            comp.saving_throw_profs = ["dexterity", "constitution"]
+            comp.condition_immunities = "charmed, exhaustion, poisoned, frightened"
+            comp.damage_immunities = "poison; resistance: fire, cold; vulnerability: lightning"
+            comp.temp_hp = 5
+            comp.notes = "Constructed with gleaming mithral plating."
+
+            out_pdf = Path(empty_tpl) / "steel_defender.pdf"
+            export_companion_pdf(comp, out_pdf, templates_dir=Path(empty_tpl))
+            self.assertTrue(out_pdf.is_file())
+
+            w_pt, h_pt = _get_pdf_page_size(out_pdf)
+            self.assertAlmostEqual(w_pt, 612.0, delta=1.0)
+            self.assertAlmostEqual(h_pt, 792.0, delta=1.0)
+
+            probe = subprocess.run(
+                ["qpdf", "--json", "--json-key=pages", "--json-key=acroform", "--json-key=qpdf", str(out_pdf)],
+                capture_output=True, text=True, check=True,
+            )
+            data = json.loads(probe.stdout)
+            self.assertEqual(len(data.get("pages", [])), 1)
+            objs = data["qpdf"][1]
+            vals = {
+                f.get("fullname", ""): objs.get("obj:" + f["object"], {}).get("value", {}).get("/V")
+                for f in data.get("acroform", {}).get("fields", [])
+            }
+            self.assertEqual(vals.get("Text1"), "u:Steel Defender")
+            self.assertEqual(vals.get("Text4"), "u:Seraphina (Lv 7)")
+            self.assertEqual(vals.get("Text43"), "u:15")
+            self.assertEqual(vals.get("Text46"), "u:40 / 41")
+            self.assertEqual(vals.get("Text47"), "u:5")
+            self.assertEqual(vals.get("Text23"), "u:14")
+            self.assertEqual(vals.get("Text24"), "u:+2")
+            self.assertEqual(vals.get("Text70.3.0.0"), "u:+5")
+            self.assertIn("210 lb.", str(vals.get("Text63")))
+            self.assertIn("CR: +3", str(vals.get("Text67")))
+            self.assertIn("exhaustion", str(vals.get("Text67")).lower())
+            self.assertIn("Melee Weapon Attack: +7 to hit", str(vals.get("Text68")))
+            self.assertIn("Vigilant.", str(vals.get("Text54")))
+
+            for expected_chk in (
+                "Check Box8",
+                "Check Box9",
+                "Check Box11",
+                "Check Box30.1",
+                "Check Box30.2",
+                "Check Box38.5.0",
+                "Check Box38.4.1",
+                "Check Box39.3.2",
+                "Check Box40.1",
+                "Check Box40.3",
+                "Check Box41.2",
+                "Check Box48.3.0",
+                "Check Box48.5.1.0",
+                "Check Box48.4.1.1",
+                "Check Box69.0",
+                "Check Box69.1",
+            ):
+                self.assertEqual(vals.get(expected_chk), "/Yes", f"{expected_chk} should be checked")
+
+        # Verify hierarchical AcroForm fullname resolution used by pypdf Windows fallback
+        node_root = {"/T": "Text70"}
+        node_mid = {"/T": "0", "/Parent": node_root}
+        node_mid2 = {"/T": "0", "/Parent": node_mid}
+        node_leaf = {"/T": "0", "/Parent": node_mid2}
+        self.assertEqual(_pypdf_annot_fullname(node_leaf), "Text70.0.0.0")
+
 
 if __name__ == "__main__":
     unittest.main()

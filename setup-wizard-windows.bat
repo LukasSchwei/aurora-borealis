@@ -1,4 +1,11 @@
 @echo off
 setlocal
-powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0setup-wizard-windows.ps1" %*
+powershell -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0setup-wizard-windows.ps1" %*
+if errorlevel 1 (
+    echo.
+    echo Aurora Borealis Setup Wizard exited with error code %ERRORLEVEL%.
+    echo Re-running with console output so you can inspect any error:
+    powershell -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0setup-wizard-windows.ps1" %*
+    pause
+)
 exit /b %ERRORLEVEL%

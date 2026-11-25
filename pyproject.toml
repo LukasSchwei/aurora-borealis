@@ -24,4 +24,4 @@ aurora-borealis = "aurora_borealis.main:main"
 include = ["aurora_borealis*"]
 
 [tool.setuptools.package-data]
-aurora_borealis = ["assets/*"]
+aurora_borealis = ["assets/*", "assets/templates/*"]

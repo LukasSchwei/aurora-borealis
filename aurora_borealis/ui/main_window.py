@@ -757,9 +757,13 @@ class MainWindow(QMainWindow):
             )
         self.setWindowFlags(win_flags)
         self.setMouseTracking(True)
-        self._icon_path = Path(__file__).resolve().parent.parent / "assets" / "aurora-borealis.svg"
-        if self._icon_path.is_file():
-            self.setWindowIcon(QIcon(str(self._icon_path)))
+        assets_dir = Path(__file__).resolve().parent.parent / "assets"
+        self._icon_path = assets_dir / "aurora-borealis.svg"
+        win_icon = assets_dir / ("aurora-borealis.ico" if is_windows() else "aurora-borealis.svg")
+        if not win_icon.is_file():
+            win_icon = self._icon_path
+        if win_icon.is_file():
+            self.setWindowIcon(QIcon(str(win_icon)))
         install_global_wheel_filter(QApplication.instance())
         self.resize(1520, 940)
 

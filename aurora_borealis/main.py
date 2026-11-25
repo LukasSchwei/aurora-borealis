@@ -135,7 +135,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         app.setStyle("Fusion")
     install_global_wheel_filter(app)
     app.setApplicationName("Aurora Borealis")
-    icon_path = Path(__file__).resolve().parent / "assets" / "aurora-borealis.svg"
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    icon_path = assets_dir / ("aurora-borealis.ico" if is_windows() else "aurora-borealis.svg")
+    if not icon_path.is_file():
+        icon_path = assets_dir / "aurora-borealis.svg"
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
 

@@ -43,10 +43,11 @@ BIN_FILE="${HOME}/.local/bin/aurora-borealis"
 APPS_DIR="${DATA_HOME}/applications"
 DESKTOP_FILE="${APPS_DIR}/aurora-borealis.desktop"
 ICON_FILE="${DATA_HOME}/icons/hicolor/scalable/apps/aurora-borealis.svg"
+ICON_PNG_FILE="${DATA_HOME}/icons/hicolor/256x256/apps/aurora-borealis.png"
 MIME_FILE="${DATA_HOME}/mime/packages/aurora-borealis.xml"
 
 echo "[1/3] Removing launcher, desktop entry, icon, and MIME association..."
-rm -f "${BIN_FILE}" "${DESKTOP_FILE}" "${ICON_FILE}" "${MIME_FILE}"
+rm -f "${BIN_FILE}" "${DESKTOP_FILE}" "${ICON_FILE}" "${ICON_PNG_FILE}" "${MIME_FILE}"
 
 echo "[2/3] Removing application directory (${INSTALL_DIR})..."
 if [ -n "${INSTALL_DIR}" ] && [ "${INSTALL_DIR}" != "/" ] && [ "${INSTALL_DIR}" != "${HOME}" ]; then
