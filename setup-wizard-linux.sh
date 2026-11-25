@@ -36,10 +36,10 @@ elif command -v zenity >/dev/null 2>&1 && { [ -n "${DISPLAY:-}" ] || [ -n "${WAY
             case "${PACKS}" in
                 *5e.tools*) EXTRA_FLAGS+=("--install-5etools") ;;
             esac
-            exec bash "${SCRIPT_DIR}/install-linux.sh" -y "${EXTRA_FLAGS[@]}"
+            exec bash "${SCRIPT_DIR}/installer/install-linux.sh" -y "${EXTRA_FLAGS[@]}"
             ;;
         Uninstall*)
-            exec bash "${SCRIPT_DIR}/uninstall-linux.sh"
+            exec bash "${SCRIPT_DIR}/installer/uninstall-linux.sh"
             ;;
         *)
             exit 0
@@ -52,8 +52,8 @@ else
     printf "Choose [1/2]: "
     read -r ANS
     if [ "${ANS}" = "2" ]; then
-        exec bash "${SCRIPT_DIR}/uninstall-linux.sh"
+        exec bash "${SCRIPT_DIR}/installer/uninstall-linux.sh"
     else
-        exec bash "${SCRIPT_DIR}/install-linux.sh"
+        exec bash "${SCRIPT_DIR}/installer/install-linux.sh"
     fi
 fi

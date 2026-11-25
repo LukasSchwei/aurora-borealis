@@ -7,6 +7,7 @@ import html
 import json
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -15,7 +16,7 @@ from PySide6.QtCore import QMarginsF, QRectF, QSizeF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
 
 from .animal_forms import find_animal_form
-from .engine import class_display_summary
+from .engine import class_display_summary, effective_selection_slot_count, selection_filled_count
 from .loader import ContentRepository
 from .models import ABILITIES, ABILITY_ABBR, SKILLS, CharacterState, ComputedCharacter
 from .paths import get_templates_dir
@@ -100,10 +101,12 @@ def validate_character_for_pdf(
     for active_sel in computed.active_selections:
         if active_sel.rule.optional:
             continue
-        chosen = state.selections.get(active_sel.key, [])
-        filled = sum(1 for i in range(active_sel.rule.number) if i < len(chosen) and chosen[i])
-        if filled < active_sel.rule.number:
-            rem = active_sel.rule.number - filled
+        eff_num = effective_selection_slot_count(active_sel, state, computed)
+        if eff_num == 0:
+            continue
+        filled = selection_filled_count(active_sel, state, eff_num)
+        if filled < eff_num:
+            rem = eff_num - filled
             missing.append(f"Choice: {active_sel.rule.name} ({rem} remaining)")
 
     if computed.spellcasting:
@@ -226,11 +229,10 @@ def _overlay_pdf_pypdf(base_pdf: Path, overlay_pdf: Path, output_path: Path) -> 
 
     base_reader = PdfReader(str(base_pdf))
     over_reader = PdfReader(str(overlay_pdf))
-    writer = PdfWriter()
-    for idx, base_page in enumerate(base_reader.pages):
+    writer = PdfWriter(clone_from=base_reader)
+    for idx, base_page in enumerate(writer.pages):
         if idx < len(over_reader.pages):
             base_page.merge_page(over_reader.pages[idx])
-        writer.add_page(base_page)
     with output_path.open("wb") as fh:
         writer.write(fh)
 
@@ -418,7 +420,7 @@ def _extract_5e_spell_slots(template_pdf: Path) -> dict[int, list[tuple[str, Opt
                 p3_checks = []
                 for annot_ref in reader.pages[2].get("/Annots") or []:
                     annot = annot_ref.get_object()
-                    fn = str(annot.get("/T") or "")
+                    fn = _pypdf_annot_fullname(annot)
                     rect = annot.get("/Rect")
                     if not rect:
                         continue
@@ -805,6 +807,90 @@ def _get_pdf_page_size(pdf_path: Path) -> tuple[float, float]:
     return 612.0, 792.0
 
 
+def _draw_center_dot(
+    painter: QPainter,
+    cx: float,
+    cy: float,
+    diameter: float = 4.6,
+) -> None:
+    """Draw a filled circular dot centered precisely at `(cx, cy)` in PDF points."""
+    r = diameter / 2.0
+    painter.save()
+    painter.setBrush(QColor("#111827"))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawEllipse(QRectF(cx - r, cy - r, diameter, diameter))
+    painter.restore()
+
+
+def _qpdf_overlay_exact(
+    qpdf_exe: str,
+    base_pdf: Path,
+    overlay_pdf: Path,
+    output_path: Path,
+) -> None:
+    """Overlay `overlay_pdf` onto `base_pdf` at 1:1 MediaBox coordinates without TrimBox drift."""
+    clean_base = base_pdf
+    tmp_ctx: Optional[tempfile.TemporaryDirectory] = None
+    try:
+        probe = subprocess.run(
+            [
+                qpdf_exe,
+                "--json",
+                "--json-stream-data=inline",
+                "--json-key=pages",
+                "--json-key=qpdf",
+                str(base_pdf),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+            **subprocess_no_window_kwargs(),
+        )
+        if probe.returncode in (0, 3):
+            data = json.loads(probe.stdout)
+            objs = data.get("qpdf", [None, {}])[1]
+            stripped = False
+            for pg in data.get("pages", []):
+                pobj = objs.get(f"obj:{pg.get('object', '')}", {}).get("value", {})
+                mbox = pobj.get("/MediaBox")
+                for box_key in ("/TrimBox", "/BleedBox", "/ArtBox"):
+                    if box_key in pobj and pobj[box_key] != mbox:
+                        pobj.pop(box_key, None)
+                        stripped = True
+            if stripped:
+                tmp_ctx = tempfile.TemporaryDirectory(prefix="aurora_qpdf_clean_")
+                tp = Path(tmp_ctx.name)
+                jp = tp / "clean_base.json"
+                cand = tp / "clean_base.pdf"
+                jp.write_text(json.dumps({"qpdf": data["qpdf"]}), encoding="utf-8")
+                prep = subprocess.run(
+                    [qpdf_exe, "--json-input", str(jp), str(cand)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    **subprocess_no_window_kwargs(),
+                )
+                if prep.returncode in (0, 3) and cand.is_file():
+                    clean_base = cand
+    except Exception:
+        clean_base = base_pdf
+
+    try:
+        res = subprocess.run(
+            [qpdf_exe, str(clean_base), "--overlay", str(overlay_pdf), "--", str(output_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            **subprocess_no_window_kwargs(),
+        )
+        if res.returncode not in (0, 3) or not output_path.is_file():
+            raise RuntimeError(f"qpdf --overlay failed: {res.stderr.strip()}")
+    finally:
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
+
+
 def export_55e_overlay_pdf(
     state: CharacterState,
     computed: ComputedCharacter,
@@ -906,86 +992,80 @@ def export_55e_overlay_pdf(
                 align=Qt.AlignmentFlag.AlignCenter,
             )
 
-            # Exact measured ability boxes, saving throw lines, and skill lines (612x792 pt)
-            # (mod_rect, score_rect, dot_x, val_x, save_dot_y, save_val_y, skills: [(name, dot_y, val_y)])
+            # Exact measured ability boxes, saving throw dots, and skill dots (612x792 pt)
+            # (mod_rect, score_rect, val_x, (sv_cx, sv_cy), sv_val_y, [(name, cx, cy, val_y)])
             ab_specs = {
                 "strength": (
                     (29.3, 220.0, 29.8, 22.3),
                     (64.4, 222.4, 24.0, 22.3),
-                    17.3,
                     28.1,
-                    268.1,
+                    (21.84, 272.52),
                     263.8,
-                    [("Athletics", 288.0, 283.7)],
+                    [("Athletics", 21.84, 292.44, 283.7)],
                 ),
                 "dexterity": (
                     (29.7, 339.6, 28.7, 22.3),
                     (64.4, 343.2, 23.0, 20.7),
-                    17.0,
                     27.8,
-                    387.6,
+                    (21.72, 392.04),
                     383.3,
                     [
-                        ("Acrobatics", 407.4, 403.2),
-                        ("Sleight of Hand", 421.7, 417.4),
-                        ("Stealth", 436.0, 431.5),
+                        ("Acrobatics", 21.72, 411.96, 403.2),
+                        ("Sleight of Hand", 21.72, 426.12, 417.4),
+                        ("Stealth", 21.72, 440.40, 431.5),
                     ],
                 ),
                 "constitution": (
                     (29.7, 487.6, 28.9, 22.3),
                     (63.1, 491.2, 26.7, 20.7),
-                    17.2,
                     27.9,
-                    535.7,
+                    (21.84, 540.12),
                     531.5,
                     [],
                 ),
                 "intelligence": (
                     (137.9, 141.8, 28.7, 22.3),
                     (172.1, 145.1, 23.4, 20.7),
-                    124.9,
                     135.7,
-                    189.7,
+                    (129.60, 194.04),
                     185.4,
                     [
-                        ("Arcana", 209.5, 205.1),
-                        ("History", 223.7, 219.4),
-                        ("Investigation", 238.1, 233.5),
-                        ("Nature", 252.3, 247.7),
-                        ("Religion", 266.4, 261.9),
+                        ("Arcana", 129.60, 213.84, 205.1),
+                        ("History", 129.60, 228.12, 219.4),
+                        ("Investigation", 129.60, 242.40, 233.5),
+                        ("Nature", 129.60, 256.68, 247.7),
+                        ("Religion", 129.60, 270.84, 261.9),
                     ],
                 ),
                 "wisdom": (
                     (136.6, 317.8, 29.6, 22.3),
                     (171.7, 321.5, 22.7, 20.9),
-                    125.1,
                     135.7,
-                    366.2,
+                    (129.60, 370.56),
                     361.6,
                     [
-                        ("Animal Handling", 386.0, 381.6),
-                        ("Insight", 400.2, 395.6),
-                        ("Medicine", 414.6, 409.8),
-                        ("Perception", 428.8, 424.2),
-                        ("Survival", 443.0, 438.4),
+                        ("Animal Handling", 129.60, 390.36, 381.6),
+                        ("Insight", 129.60, 404.64, 395.6),
+                        ("Medicine", 129.60, 418.92, 409.8),
+                        ("Perception", 129.60, 433.08, 424.2),
+                        ("Survival", 129.60, 447.36, 438.4),
                     ],
                 ),
                 "charisma": (
                     (137.5, 494.2, 29.1, 22.3),
                     (170.1, 498.0, 25.0, 20.9),
-                    125.0,
                     135.7,
-                    542.7,
+                    (129.60, 547.08),
                     538.2,
                     [
-                        ("Deception", 562.5, 558.1),
-                        ("Intimidation", 576.8, 572.4),
-                        ("Performance", 591.1, 586.6),
-                        ("Persuasion", 605.3, 600.7),
+                        ("Deception", 129.60, 566.88, 558.1),
+                        ("Intimidation", 129.48, 581.16, 572.4),
+                        ("Performance", 129.60, 595.44, 586.6),
+                        ("Persuasion", 129.60, 609.60, 600.7),
                     ],
                 ),
             }
-            for ab, (mod_r, score_r, dot_x, val_x, sv_dot_y, sv_val_y, sk_rows) in ab_specs.items():
+            for ab, (mod_r, score_r, val_x, (sv_cx, sv_cy), sv_val_y, sk_rows) in ab_specs.items():
                 mod_txt = _fmt_mod(computed.ability_modifiers[ab])
                 tot_txt = str(computed.ability_totals[ab])
                 _draw_text(painter, *mod_r, mod_txt, size=11.5, bold=True, align=Qt.AlignmentFlag.AlignCenter)
@@ -993,46 +1073,37 @@ def export_55e_overlay_pdf(
 
                 sv = computed.saving_throws[ab]
                 if sv.proficient:
-                    painter.save()
-                    painter.setBrush(QColor("#111827"))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QRectF(dot_x + 0.8, sv_dot_y + 2.6, 5.2, 5.2))
-                    painter.restore()
+                    _draw_center_dot(painter, sv_cx, sv_cy, diameter=4.6)
                 _draw_text(
                     painter, val_x, sv_val_y + 1.5, 17.4, 13.0, _fmt_mod(sv.bonus),
                     size=8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter,
                 )
 
-                for sk_name, sk_dot_y, sk_val_y in sk_rows:
+                for sk_name, sk_cx, sk_cy, sk_val_y in sk_rows:
                     sk = computed.skills[sk_name]
                     if sk.proficient:
-                        painter.save()
-                        painter.setBrush(QColor("#111827"))
-                        painter.setPen(Qt.PenStyle.NoPen)
-                        painter.drawEllipse(QRectF(dot_x + 0.8, sk_dot_y + 2.6, 5.2, 5.2))
-                        painter.restore()
+                        _draw_center_dot(painter, sk_cx, sk_cy, diameter=4.6)
                     _draw_text(
                         painter, val_x, sk_val_y + 1.5, 17.4, 13.0, _fmt_mod(sk.bonus),
                         size=8.0, align=Qt.AlignmentFlag.AlignCenter,
                     )
+
+            if state.heroic_inspiration:
+                _draw_center_dot(painter, 58.49, 604.08, diameter=6.0)
 
             # Equipment Training & Proficiencies (Armor Training diamonds + Weapons & Tools)
             profs_lower = " ".join(
                 [*computed.proficiencies, *(e.name for e in computed.granted_elements), *(e.id for e in computed.granted_elements)]
             ).lower()
             armor_diamonds = [
-                (("light armor", "light_armor"), 59.7, 657.3),
-                (("medium armor", "medium_armor"), 94.2, 656.8),
-                (("heavy armor", "heavy_armor"), 139.1, 657.2),
-                (("shield",), 177.0, 656.8),
+                (("light armor", "light_armor"), 63.96, 661.44),
+                (("medium armor", "medium_armor"), 98.52, 661.32),
+                (("heavy armor", "heavy_armor"), 143.40, 661.44),
+                (("shield",), 181.20, 661.44),
             ]
-            for kws, dx, dy in armor_diamonds:
+            for kws, cx, cy in armor_diamonds:
                 if any(kw in profs_lower for kw in kws):
-                    painter.save()
-                    painter.setBrush(QColor("#111827"))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QRectF(dx - 0.3, dy + 1.2, 5.2, 5.2))
-                    painter.restore()
+                    _draw_center_dot(painter, cx, cy, diameter=4.4)
 
             clean_profs = [
                 p.replace("Weapon Proficiency (", "").replace("Armor Proficiency (", "").rstrip(")")
@@ -1118,15 +1189,15 @@ def export_55e_overlay_pdf(
                         str(sc.save_dc),
                         _fmt_mod(sc.attack_bonus),
                     )
-                _draw_text(painter, 24.9, 15.0, 110.2, 18.0, ab_hdr, size=9.5 if len(ab_hdr) <= 14 else 7.8, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                _draw_text(painter, 24.9, 18.84, 110.2, 18.0, ab_hdr, size=9.5 if len(ab_hdr) <= 14 else 7.8, bold=True, align=Qt.AlignmentFlag.AlignCenter)
                 _draw_text(painter, 14.0, 49.7, 33.7, 26.5, mod_hdr, size=11 if len(mod_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
                 _draw_text(painter, 13.2, 78.6, 34.6, 25.7, dc_hdr, size=11 if len(dc_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
                 _draw_text(painter, 13.3, 107.2, 34.3, 25.3, atk_hdr, size=11 if len(atk_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
 
                 slot_coords = {
-                    1: (184.3, 87.3), 2: (184.3, 101.7), 3: (184.3, 115.9),
-                    4: (273.8, 87.5), 5: (273.8, 101.8), 6: (273.8, 115.9),
-                    7: (353.5, 87.4), 8: (353.5, 101.7), 9: (353.5, 115.8),
+                    1: (184.3, 88.8), 2: (184.3, 103.2), 3: (184.3, 117.3),
+                    4: (273.8, 89.0), 5: (273.8, 103.3), 6: (273.8, 117.4),
+                    7: (353.5, 88.9), 8: (353.5, 103.2), 9: (353.5, 117.3),
                 }
                 merged_slots = dict(sc.slots)
                 for slvl, cnt in sc.pact_slots.items():
@@ -1168,14 +1239,10 @@ def export_55e_overlay_pdf(
                         or bool(sel.setters.get("materialComponent", "").strip())
                         or "m" in re.findall(r"[a-z]+", sel.setters.get("components", "").lower())
                     )
-                    dot_y = 186.5 + idx * 19.72 + 1.8
-                    for flag, dx in ((is_conc, 244.0), (is_rit, 266.0), (is_mat, 288.2)):
+                    dot_cy = 191.04 + idx * 19.73
+                    for flag, cx in ((is_conc, 246.60), (is_rit, 268.80), (is_mat, 290.88)):
                         if flag:
-                            painter.save()
-                            painter.setBrush(QColor("#111827"))
-                            painter.setPen(Qt.PenStyle.NoPen)
-                            painter.drawEllipse(QRectF(dx, dot_y, 5.2, 5.2))
-                            painter.restore()
+                            _draw_center_dot(painter, cx, dot_cy, diameter=4.4)
 
             # Appearance + Portrait (top right)
             app_txt = f"Age: {state.age}  Ht: {state.height}  Wt: {state.weight}\nEyes: {state.eyes}  Skin: {state.skin}  Hair: {state.hair}"
@@ -1198,14 +1265,14 @@ def export_55e_overlay_pdf(
 
             # Magic Item Attunement (3 slots below Equipment on Page 2)
             attuned_items = [it.name for it in state.inventory if it.attuned][:3]
-            attune_ys = (606.8, 626.8, 646.6)
+            attune_specs = (
+                (429.36, 615.36, 606.8),
+                (429.24, 635.64, 626.8),
+                (429.36, 655.92, 646.6),
+            )
             for idx, aname in enumerate(attuned_items):
-                ay = attune_ys[idx]
-                painter.save()
-                painter.setBrush(QColor("#111827"))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(QRectF(427.2, ay + 6.5, 5.0, 5.0))
-                painter.restore()
+                cx, cy, ay = attune_specs[idx]
+                _draw_center_dot(painter, cx, cy, diameter=4.4)
                 _draw_text(painter, 437.8, ay, 156.2, 16.5, aname, size=7.8)
 
             coin_rects = {
@@ -1222,15 +1289,7 @@ def export_55e_overlay_pdf(
 
         qpdf_exe = find_executable("qpdf")
         if qpdf_exe:
-            res = subprocess.run(
-                [qpdf_exe, str(template_pdf), "--overlay", str(overlay_pdf), "--", str(output_path)],
-                capture_output=True,
-                text=True,
-                check=False,
-                **subprocess_no_window_kwargs(),
-            )
-            if res.returncode not in (0, 3) or not output_path.is_file():
-                raise RuntimeError(f"qpdf --overlay failed: {res.stderr.strip()}")
+            _qpdf_overlay_exact(qpdf_exe, template_pdf, overlay_pdf, output_path)
         else:
             _overlay_pdf_pypdf(template_pdf, overlay_pdf, output_path)
 
@@ -1326,6 +1385,9 @@ def _resolve_template_pdf(filename: str, templates_dir: Optional[Path] = None) -
         (Path(templates_dir) if templates_dir else get_templates_dir()) / filename,
         _BUNDLED_TEMPLATES_DIR / filename,
     ]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "aurora_borealis" / "assets" / "templates" / filename)
     for cand in candidates:
         if cand.is_file():
             return cand
@@ -1398,7 +1460,7 @@ def export_character_pdf(
                         if len(reader.pages) >= 3:
                             for annot_ref in reader.pages[2].get("/Annots") or []:
                                 annot = annot_ref.get_object()
-                                fn = str(annot.get("/T") or "")
+                                fn = _pypdf_annot_fullname(annot)
                                 if fn in checked:
                                     rect = annot.get("/Rect")
                                     if rect:

@@ -84,8 +84,8 @@ def build_install_command(
     install_aurora_legacy: bool = False,
     install_5etools: bool = False,
 ) -> list[str]:
-    """Build the bash command list to run install-linux.sh."""
-    cmd = ["bash", str(Path(script_dir) / "install-linux.sh")]
+    """Build the bash command list to run installer/install-linux.sh."""
+    cmd = ["bash", str(Path(script_dir) / "installer" / "install-linux.sh")]
     if in_place:
         cmd.append("--in-place")
     elif prefix.strip():
@@ -108,8 +108,8 @@ def build_uninstall_command(
     prefix: str,
     purge_config: bool,
 ) -> list[str]:
-    """Build the bash command list to run uninstall-linux.sh."""
-    cmd = ["bash", str(Path(script_dir) / "uninstall-linux.sh")]
+    """Build the bash command list to run installer/uninstall-linux.sh."""
+    cmd = ["bash", str(Path(script_dir) / "installer" / "uninstall-linux.sh")]
     if prefix.strip():
         cmd.extend(["--prefix", prefix.strip()])
     if purge_config:
@@ -224,6 +224,30 @@ def build_qt_wizard_dialog(
     )
 
     class LinuxSetupWizardQt(QDialog):
+        def _set_btn_svg(self, btn: QPushButton, icon_name: str, color: str) -> None:
+            try:
+                from PySide6.QtCore import QByteArray, QRectF, QSize
+                from PySide6.QtGui import QPainter, QPixmap
+                from PySide6.QtSvg import QSvgRenderer
+
+                svg_path = self.script_dir / "aurora_borealis" / "assets" / "icons" / f"{icon_name}.svg"
+                if not svg_path.is_file():
+                    return
+                svg_xml = svg_path.read_text(encoding="utf-8").replace("currentColor", color)
+                renderer = QSvgRenderer(QByteArray(svg_xml.encode("utf-8")))
+                if not renderer.isValid():
+                    return
+                pix = QPixmap(16, 16)
+                pix.fill(Qt.GlobalColor.transparent)
+                p = QPainter(pix)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                renderer.render(p, QRectF(0.0, 0.0, 16.0, 16.0))
+                p.end()
+                btn.setIcon(QIcon(pix))
+                btn.setIconSize(QSize(16, 16))
+            except Exception:
+                pass
+
         def __init__(self) -> None:
             super().__init__()
             self.script_dir = Path(script_dir)
@@ -278,13 +302,16 @@ def build_qt_wizard_dialog(
             nav = QHBoxLayout()
             self.btn_cancel = QPushButton("Cancel")
             self.btn_cancel.clicked.connect(self.reject)
-            self.btn_back = QPushButton("← Back")
+            self.btn_back = QPushButton("Back")
+            self._set_btn_svg(self.btn_back, "arrow-left", "#eef0f3")
             self.btn_back.clicked.connect(self._on_back)
-            self.btn_next = QPushButton("Next →")
+            self.btn_next = QPushButton("Next")
             self.btn_next.setObjectName("PrimaryBtn")
+            self._set_btn_svg(self.btn_next, "arrow-right", "#0e0f11")
             self.btn_next.clicked.connect(self._on_next)
             self.btn_finish = QPushButton("Finish")
             self.btn_finish.setObjectName("PrimaryBtn")
+            self._set_btn_svg(self.btn_finish, "check", "#0e0f11")
             self.btn_finish.clicked.connect(self._on_finish)
             nav.addWidget(self.btn_cancel)
             nav.addStretch()
@@ -483,13 +510,15 @@ def build_qt_wizard_dialog(
             if idx == 1:
                 un = self.is_uninstall_selected()
                 self.opt_stack.setCurrentIndex(1 if un else 0)
-                self.btn_next.setText("Uninstall Now →" if un else "Install Now →")
+                self.btn_next.setText("Uninstall Now" if un else "Install Now")
                 self.btn_next.setObjectName("DangerBtn" if un else "PrimaryBtn")
+                self._set_btn_svg(self.btn_next, "trash" if un else "arrow-right", "#fca5a5" if un else "#0e0f11")
                 self.btn_next.style().unpolish(self.btn_next)
                 self.btn_next.style().polish(self.btn_next)
             elif idx == 0:
-                self.btn_next.setText("Next →")
+                self.btn_next.setText("Next")
                 self.btn_next.setObjectName("PrimaryBtn")
+                self._set_btn_svg(self.btn_next, "arrow-right", "#0e0f11")
                 self.btn_next.style().unpolish(self.btn_next)
                 self.btn_next.style().polish(self.btn_next)
             self._ensure_buttons_fit()
@@ -558,7 +587,7 @@ def build_qt_wizard_dialog(
             if self._succeeded:
                 self.lbl_finish_title.setStyleSheet("font-size: 12.5pt; font-weight: 700; color: #34d399;")
                 if un:
-                    self.lbl_finish_title.setText("✓ Aurora Borealis Uninstalled")
+                    self.lbl_finish_title.setText("Aurora Borealis Uninstalled")
                     self.lbl_finish_desc.setText(
                         "Application files and desktop integration were removed.\n"
                         "Your saved characters in ~/Documents remain untouched."
@@ -573,7 +602,7 @@ def build_qt_wizard_dialog(
                     if self.chk_5etools.isChecked():
                         packs.append("5e.tools")
                     pack_txt = ", ".join(packs) if packs else "On-demand in app"
-                    self.lbl_finish_title.setText("✓ Aurora Borealis Installation Complete")
+                    self.lbl_finish_title.setText("Aurora Borealis Installation Complete")
                     self.lbl_finish_desc.setText(
                         f"Installed in: {target}\n"
                         f"CLI command: aurora-borealis\n"
@@ -584,9 +613,9 @@ def build_qt_wizard_dialog(
                     self.chk_launch.setChecked(True)
             else:
                 self.lbl_finish_title.setStyleSheet("font-size: 12.5pt; font-weight: 700; color: #fca5a5;")
-                self.lbl_finish_title.setText(f"⚠ Setup exited with code {exit_code}")
+                self.lbl_finish_title.setText(f"Setup exited with code {exit_code}")
                 self.lbl_finish_desc.setText(
-                    "Please check the output log or run install-linux.sh / uninstall-linux.sh in a terminal for interactive sudo prompts."
+                    "Please check the output log or run installer/install-linux.sh / installer/uninstall-linux.sh in a terminal for interactive sudo prompts."
                 )
                 self.chk_launch.setVisible(False)
                 self.chk_launch.setChecked(False)

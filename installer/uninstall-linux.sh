@@ -8,7 +8,7 @@ PURGE_CONFIG=0
 
 usage() {
     cat <<'EOF'
-Usage: ./uninstall-linux.sh [OPTIONS]
+Usage: ./installer/uninstall-linux.sh [OPTIONS]
 
 Options:
   --prefix DIR      Target installation directory to remove (default: ~/.local/share/aurora-borealis/app)

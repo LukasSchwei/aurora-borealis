@@ -44,8 +44,10 @@ from ..companions import (
     save_dndcomp,
 )
 from ..models import ABILITIES, ABILITY_ABBR, SKILLS
+from ..paths import get_os_downloads_dir
 from ..persistence import encode_portrait_file
 from .dialogs import pixmap_from_portrait
+from .icons import apply_button_icon
 from .ui_helpers import ensure_widgets_fit
 
 
@@ -87,7 +89,8 @@ class CompanionEditorView(QWidget):
         top_bar.setObjectName("TopNavBar")
         tb = QHBoxLayout(top_bar)
         tb.setContentsMargins(14, 8, 14, 8)
-        btn_back = QPushButton("← Characters")
+        btn_back = QPushButton("Characters")
+        apply_button_icon(btn_back, "arrow-left", size=15)
         btn_back.clicked.connect(self.back_requested.emit)
         self.lbl_title = QLabel("Companion")
         self.lbl_title.setObjectName("TitleText")
@@ -96,7 +99,7 @@ class CompanionEditorView(QWidget):
         self.btn_save = QPushButton("Save (.dndcomp)")
         self.btn_save.setObjectName("PrimaryBtn")
         self.btn_save.clicked.connect(self.save_companion)
-        self.btn_save_as = QPushButton("Save As…")
+        self.btn_save_as = QPushButton("Save As")
         self.btn_save_as.clicked.connect(self.save_companion_as)
         self.btn_pdf = QPushButton("Export Companion PDF")
         self.btn_pdf.clicked.connect(self.export_pdf_dialog)
@@ -179,7 +182,7 @@ class CompanionEditorView(QWidget):
             sg.addLayout(box, r, c)
         vl.addWidget(stats_card)
 
-        tpl_box = QGroupBox("Template & Master Scaling")
+        tpl_box = QGroupBox("Template && Master Scaling")
         tl = QFormLayout(tpl_box)
         self.cmb_template = QComboBox()
         for key, tpl in COMPANION_TEMPLATES.items():
@@ -195,7 +198,7 @@ class CompanionEditorView(QWidget):
         self.txt_owner.textChanged.connect(self._on_meta_changed)
         tl.addRow("Owner / Master:", self.txt_owner)
 
-        self.chk_scale = QCheckBox("Scale with Owner Level & PB")
+        self.chk_scale = QCheckBox("Scale with Owner Level && PB")
         self.chk_scale.stateChanged.connect(self._on_meta_changed)
         tl.addRow(self.chk_scale)
 
@@ -235,7 +238,7 @@ class CompanionEditorView(QWidget):
         stats_host = QWidget()
         stl = QVBoxLayout(stats_host)
 
-        id_box = QGroupBox("Identity & Combat")
+        id_box = QGroupBox("Identity && Combat")
         idf = QGridLayout(id_box)
         self.txt_name = QLineEdit()
         self.txt_type = QLineEdit()
@@ -275,7 +278,7 @@ class CompanionEditorView(QWidget):
                 w.valueChanged.connect(self._on_meta_changed)
         stl.addWidget(id_box)
 
-        ab_box = QGroupBox("Ability Scores & Saving Throws")
+        ab_box = QGroupBox("Ability Scores && Saving Throws")
         abl = QGridLayout(ab_box)
         self.ab_spins: dict[str, QSpinBox] = {}
         self.save_checks: dict[str, QCheckBox] = {}
@@ -293,7 +296,7 @@ class CompanionEditorView(QWidget):
             self.save_checks[ab] = chk
         stl.addWidget(ab_box)
 
-        prof_box = QGroupBox("Senses, Languages & Immunities")
+        prof_box = QGroupBox("Senses, Languages && Immunities")
         pf = QFormLayout(prof_box)
         self.txt_senses = QLineEdit()
         self.txt_languages = QLineEdit()
@@ -311,7 +314,7 @@ class CompanionEditorView(QWidget):
         stl.addWidget(prof_box)
         stl.addStretch()
         stats_scroll.setWidget(stats_host)
-        self.tabs.addTab(stats_scroll, "Stats & Defenses")
+        self.tabs.addTab(stats_scroll, "Stats && Defenses")
 
         # Tab 2: Traits & Actions
         ta_w = QWidget()
@@ -357,7 +360,7 @@ class CompanionEditorView(QWidget):
         ac_btns.addStretch()
         acl.addLayout(ac_btns)
         tal.addWidget(act_box, 1)
-        self.tabs.addTab(ta_w, "Traits & Actions")
+        self.tabs.addTab(ta_w, "Traits && Actions")
 
         # Tab 3: Notes
         notes_w = QWidget()
@@ -541,7 +544,10 @@ class CompanionEditorView(QWidget):
 
     def _pick_portrait(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Companion Portrait", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)"
+            self,
+            "Select Companion Portrait",
+            str(get_os_downloads_dir()),
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
         )
         if not path:
             return
@@ -560,8 +566,7 @@ class CompanionEditorView(QWidget):
         return True
 
     def save_companion_as(self) -> bool:
-        base_dir = self._characters_dir or Path.home()
-        base_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = get_os_downloads_dir()
         slug = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in (self.comp.name or "companion").lower()).strip("_") or "companion"
         default_path = str(base_dir / f"{slug}.dndcomp")
         path, _ = QFileDialog.getSaveFileName(
@@ -575,9 +580,10 @@ class CompanionEditorView(QWidget):
         return self.save_companion()
 
     def export_pdf_dialog(self) -> None:
-        default_name = f"{self.comp.name or 'companion'}.pdf"
+        slug = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in (self.comp.name or "companion")).strip("._") or "companion"
+        default_path = str(get_os_downloads_dir() / f"{slug}.pdf")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Companion Sheet PDF", default_name, "PDF Files (*.pdf)"
+            self, "Export Companion Sheet PDF", default_path, "PDF Files (*.pdf)"
         )
         if path:
             if not path.lower().endswith(".pdf"):

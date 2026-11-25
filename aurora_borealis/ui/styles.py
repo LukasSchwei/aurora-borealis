@@ -5,6 +5,8 @@ from __future__ import annotations
 import functools
 from pathlib import Path
 
+from ..config import snap_ui_scale
+
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 
 _DARK_TOKENS = {
@@ -77,7 +79,7 @@ _LIGHT_TOKENS = {
 
 
 def _build_stylesheet(t: dict[str, str], scale: float = 1.0, is_light: bool = False) -> str:
-    s = max(0.85, min(1.5, float(scale)))
+    s = max(0.8, min(1.2, float(scale)))
     suffix = "dark" if is_light else "light"
     up_svg = (_ASSETS_DIR / f"chevron-up-{suffix}.svg").as_posix()
     down_svg = (_ASSETS_DIR / f"chevron-down-{suffix}.svg").as_posix()
@@ -138,39 +140,43 @@ QLabel#WindowBreadcrumb {{
 QPushButton#ThemeToggleBtn {{
     background-color: {t["btn_bg"]};
     border: 1px solid {t["border"]};
-    border-radius: {px(16)};
+    border-radius: {px(13)};
     color: {t["text"]};
-    min-width: {px(34)};
-    max-width: {px(34)};
-    min-height: {px(32)};
-    max-height: {px(32)};
+    min-width: {px(26)};
+    max-width: {px(26)};
+    min-height: {px(26)};
+    max-height: {px(26)};
     padding: 0px;
-    font-size: {pt(12.5)};
+    font-size: {pt(11.0)};
     font-weight: 700;
 }}
 QPushButton#ThemeToggleBtn:hover {{
     background-color: {t["btn_hover"]};
     border-color: {t["accent"]};
 }}
-QLabel#ScaleValuePill {{
+QComboBox#ScaleStageCombo {{
     background-color: {t["card_elev"]};
     border: 1px solid {t["border"]};
-    border-radius: {px(12)};
+    border-radius: {px(11)};
     color: {t["text"]};
-    font-size: {pt(9.8)};
-    font-weight: 700;
-    padding: {px(3)} {px(10)};
-    min-width: {px(50)};
+    font-size: {pt(9.0)};
+    font-weight: 600;
+    padding: {px(2)} {px(22)} {px(2)} {px(9)};
+    min-height: {px(22)};
+}}
+QComboBox#ScaleStageCombo:hover {{
+    border-color: {t["accent"]};
 }}
 QPushButton#KdeWinBtn {{
     background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: {px(14)};
+    border: none;
+    border-radius: 0px;
+    margin: 0px;
     color: {t["text_muted"]};
-    min-width: {px(28)};
-    max-width: {px(28)};
-    min-height: {px(28)};
-    max-height: {px(28)};
+    min-width: {px(40)};
+    max-width: {px(40)};
+    min-height: {px(34)};
+    max-height: {px(56)};
     padding: 0px;
 }}
 QPushButton#KdeWinBtn:hover {{
@@ -179,13 +185,14 @@ QPushButton#KdeWinBtn:hover {{
 }}
 QPushButton#KdeCloseBtn {{
     background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: {px(14)};
+    border: none;
+    border-radius: 0px;
+    margin: 0px;
     color: {t["text_muted"]};
-    min-width: {px(28)};
-    max-width: {px(28)};
-    min-height: {px(28)};
-    max-height: {px(28)};
+    min-width: {px(40)};
+    max-width: {px(40)};
+    min-height: {px(34)};
+    max-height: {px(56)};
     padding: 0px;
 }}
 QPushButton#KdeCloseBtn:hover {{
@@ -204,13 +211,22 @@ QFrame#SubBar {{
 }}
 
 /* Cards & Panels */
-QFrame#SidebarCard, QFrame#CharCard, QFrame#ChoiceCard {{
+QFrame#SidebarCard, QFrame#ChoiceCard {{
     background-color: {t["card"]};
     border: 1px solid {t["border"]};
     border-radius: {px(14)};
 }}
+QFrame#CharCard {{
+    background-color: {t["card"]};
+    border: 2px solid {t["border"]};
+    border-radius: {px(14)};
+}}
 QFrame#CharCard:hover {{
-    border: 2px solid {t["accent"]};
+    border-color: {t["accent"]};
+}}
+QWidget#CharCardBody {{
+    background-color: transparent;
+    border: none;
 }}
 QFrame#ChoiceCardPending {{
     background-color: {t["card"]};
@@ -477,13 +493,18 @@ QPushButton#CompactCardBtn {{
 }}
 QPushButton#StepperBtn {{
     padding: 0px;
-    font-size: {pt(14.0)};
+    font-size: {pt(13.0)};
     font-weight: bold;
-    border-radius: {px(16)};
-    min-width: {px(32)};
-    max-width: {px(32)};
-    min-height: {px(32)};
-    max-height: {px(32)};
+    border-radius: {px(13)};
+    min-width: {px(26)};
+    max-width: {px(26)};
+    min-height: {px(26)};
+    max-height: {px(26)};
+}}
+QPushButton#StepperBtn:disabled {{
+    color: {t["text_dim"]};
+    border-color: {t["border_subtle"]};
+    background-color: {t["surface"]};
 }}
 QPushButton#NavTabBtn {{
     background-color: transparent;
@@ -655,5 +676,6 @@ def _cached_stylesheet(is_light: bool, scale_pct: int) -> str:
 
 def get_stylesheet(theme: str = "dark", scale: float = 1.0) -> str:
     is_light = str(theme).lower() == "light"
-    scale_pct = max(85, min(150, round(float(scale) * 100)))
+    snapped = snap_ui_scale(scale)
+    scale_pct = round(snapped * 100)
     return _cached_stylesheet(is_light, scale_pct)

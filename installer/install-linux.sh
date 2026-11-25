@@ -2,30 +2,33 @@
 set -euo pipefail
 
 # Aurora Borealis Linux All-in-One Installer
-# Installs Python virtualenv + PySide6/lxml/pypdf, system tools (7z/qpdf),
-# CLI command (~/.local/bin/aurora-borealis), SVG icon, MIME types (.dnd5e/.dnd55e/.dndcomp),
+# Installs Python virtualenv + dependencies from pyproject.toml, system tools (7z/qpdf),
+# CLI command (~/.local/bin/aurora-borealis), SVG/PNG icon, MIME types (.dnd5e/.dnd55e/.dndcomp),
 # and desktop application menu shortcut.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${INSTALLER_DIR}/.." && pwd)"
 DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 INSTALL_DIR="${DATA_HOME}/aurora-borealis/app"
 BIN_DIR="${HOME}/.local/bin"
 IN_PLACE=0
 INSTALL_SYSTEM_DEPS=1
 INSTALL_DESKTOP=1
+DESKTOP_ONLY=0
 INSTALL_AURORA_LEGACY=0
 INSTALL_5ETOOLS=0
 ASSUME_YES=0
 
 usage() {
     cat <<'EOF'
-Usage: ./install-linux.sh [OPTIONS]
+Usage: ./installer/install-linux.sh [OPTIONS]
 
 Options:
   --prefix DIR             Target installation directory (default: ~/.local/share/aurora-borealis/app)
   --in-place               Create .venv directly in the repository folder instead of copying
   --no-system-deps         Skip apt/dnf/pacman/zypper system package installation
   --no-desktop             Skip .desktop, icon, and MIME association setup
+  --desktop-only           Install only the .desktop entry, icon, and MIME types for the current folder
   --install-aurora-legacy  Download & install official Aurora Legacy content from GitHub
   --install-5etools        Download & convert 5e.tools D&D 5e/5.5e content from GitHub
   --gui                    Launch the graphical Linux Setup Wizard instead
@@ -52,6 +55,10 @@ while [ "$#" -gt 0 ]; do
             INSTALL_DESKTOP=0
             shift
             ;;
+        --desktop-only)
+            DESKTOP_ONLY=1
+            shift
+            ;;
         --install-aurora-legacy)
             INSTALL_AURORA_LEGACY=1
             shift
@@ -61,7 +68,7 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --gui)
-            exec bash "${SCRIPT_DIR}/setup-wizard-linux.sh"
+            exec bash "${REPO_DIR}/setup-wizard-linux.sh"
             ;;
         --yes|-y)
             ASSUME_YES=1
@@ -78,6 +85,71 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+install_desktop_integration() {
+    local app_dir="$1"
+    local apps_dir="${DATA_HOME}/applications"
+    local icon_scalable_dir="${DATA_HOME}/icons/hicolor/scalable/apps"
+    local icon_256_dir="${DATA_HOME}/icons/hicolor/256x256/apps"
+    local mime_dir="${DATA_HOME}/mime/packages"
+
+    mkdir -p "${apps_dir}" "${icon_scalable_dir}" "${icon_256_dir}" "${mime_dir}"
+
+    cp "${app_dir}/aurora_borealis/assets/aurora-borealis.svg" "${icon_scalable_dir}/aurora-borealis.svg"
+    if [ -f "${app_dir}/aurora_borealis/assets/aurora-borealis.png" ]; then
+        cp "${app_dir}/aurora_borealis/assets/aurora-borealis.png" "${icon_256_dir}/aurora-borealis.png"
+    fi
+
+    cat > "${mime_dir}/aurora-borealis.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-dnd5e">
+    <comment>Aurora Borealis D&amp;D 5e Character</comment>
+    <glob pattern="*.dnd5e"/>
+  </mime-type>
+  <mime-type type="application/x-dnd55e">
+    <comment>Aurora Borealis D&amp;D 5.5e Character</comment>
+    <glob pattern="*.dnd55e"/>
+  </mime-type>
+  <mime-type type="application/x-dndcomp">
+    <comment>Aurora Borealis Companion Sheet</comment>
+    <glob pattern="*.dndcomp"/>
+  </mime-type>
+</mime-info>
+EOF
+
+    cat > "${apps_dir}/aurora-borealis.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Aurora Borealis
+GenericName=D&D 5e / 5.5e Character Builder
+Comment=Native D&D 5e / 5.5e Character & Companion Builder
+Exec="${app_dir}/aurora-borealis" --open %f
+TryExec=${app_dir}/aurora-borealis
+Icon=aurora-borealis
+Terminal=false
+Categories=Game;RolePlaying;
+MimeType=application/x-dnd5e;application/x-dnd55e;application/x-dndcomp;
+StartupWMClass=aurora-borealis
+EOF
+
+    if command -v update-mime-database >/dev/null 2>&1; then
+        update-mime-database "${DATA_HOME}/mime" || true
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "${apps_dir}" || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t "${DATA_HOME}/icons/hicolor" 2>/dev/null || true
+    fi
+
+    echo "Installed desktop entry at ${apps_dir}/aurora-borealis.desktop"
+}
+
+if [ "${DESKTOP_ONLY}" -eq 1 ]; then
+    install_desktop_integration "${REPO_DIR}"
+    exit 0
+fi
 
 install_system_packages() {
     local need_py=0 need_7z=0 need_qpdf=0 need_venv=0
@@ -141,28 +213,40 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 if [ "${IN_PLACE}" -eq 1 ]; then
-    TARGET_DIR="${SCRIPT_DIR}"
+    TARGET_DIR="${REPO_DIR}"
     echo "[2/4] Installing in-place at ${TARGET_DIR}..."
 else
     TARGET_DIR="${INSTALL_DIR}"
     echo "[2/4] Copying Aurora Borealis files to ${TARGET_DIR}..."
     mkdir -p "${TARGET_DIR}"
-    for item in aurora_borealis installer aurora-borealis aurora-borealis.bat aurora-borealis.ps1 install-desktop.sh install-linux.sh uninstall-linux.sh setup-wizard-linux.sh pyproject.toml requirements.txt README.md; do
-        if [ -e "${SCRIPT_DIR}/${item}" ]; then
+    for item in aurora_borealis installer aurora-borealis setup-wizard-linux.sh pyproject.toml README.md; do
+        if [ -e "${REPO_DIR}/${item}" ]; then
             rm -rf "${TARGET_DIR}/${item}"
-            cp -R "${SCRIPT_DIR}/${item}" "${TARGET_DIR}/${item}"
+            cp -R "${REPO_DIR}/${item}" "${TARGET_DIR}/${item}"
         fi
     done
-    find "${TARGET_DIR}/aurora_borealis" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    find "${TARGET_DIR}/aurora_borealis" "${TARGET_DIR}/installer" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 fi
 
-chmod +x "${TARGET_DIR}/aurora-borealis" "${TARGET_DIR}/install-desktop.sh" "${TARGET_DIR}/setup-wizard-linux.sh" "${TARGET_DIR}/uninstall-linux.sh" 2>/dev/null || true
+chmod +x "${TARGET_DIR}/aurora-borealis" "${TARGET_DIR}/setup-wizard-linux.sh" "${TARGET_DIR}/installer/install-linux.sh" "${TARGET_DIR}/installer/uninstall-linux.sh" 2>/dev/null || true
 
 echo "[3/4] Creating Python virtual environment and installing dependencies..."
 python3 -m venv "${TARGET_DIR}/.venv"
 "${TARGET_DIR}/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
-"${TARGET_DIR}/.venv/bin/python" -m pip install -r "${TARGET_DIR}/requirements.txt"
-"${TARGET_DIR}/.venv/bin/python" -m pip install --no-deps --no-build-isolation -e "${TARGET_DIR}"
+"${TARGET_DIR}/.venv/bin/python" -m pip install --no-build-isolation -e "${TARGET_DIR}"
+
+USER_TPL_DIR="${DATA_HOME}/aurora-borealis/templates"
+BUNDLED_TPL_DIR="${TARGET_DIR}/aurora_borealis/assets/templates"
+if [ -d "${BUNDLED_TPL_DIR}" ]; then
+    mkdir -p "${USER_TPL_DIR}"
+    for pdf_tpl in "${BUNDLED_TPL_DIR}"/*.pdf; do
+        [ -f "${pdf_tpl}" ] || continue
+        tpl_name="$(basename "${pdf_tpl}")"
+        if [ ! -f "${USER_TPL_DIR}/${tpl_name}" ]; then
+            cp "${pdf_tpl}" "${USER_TPL_DIR}/${tpl_name}"
+        fi
+    done
+fi
 
 mkdir -p "${BIN_DIR}"
 cat > "${BIN_DIR}/aurora-borealis" <<EOF
@@ -173,7 +257,7 @@ chmod +x "${BIN_DIR}/aurora-borealis"
 
 if [ "${INSTALL_DESKTOP}" -eq 1 ]; then
     echo "[4/4] Installing desktop entry, icon, and MIME file associations (.dnd5e, .dnd55e, .dndcomp)..."
-    bash "${TARGET_DIR}/install-desktop.sh"
+    install_desktop_integration "${TARGET_DIR}"
 else
     echo "[4/4] Skipping desktop integration (--no-desktop)."
 fi

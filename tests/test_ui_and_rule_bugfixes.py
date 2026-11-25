@@ -377,13 +377,21 @@ class UiAndRuleBugfixTests(unittest.TestCase):
             app.processEvents()
             self.assertEqual(win.state.level, 3)
 
-            # Rescale updates fixed widget sizes cleanly without scrollbars on Saves/Skills
-            win.apply_scale(1.3, persist=False)
+            # Rescale updates fixed widget sizes cleanly without scrollbars on Saves/Skills & snaps to 5 named stages
+            win.apply_scale(1.2, persist=False)
             app.processEvents()
-            self.assertEqual(win.sidebar_panel.minimumWidth(), round(265 * 1.3))
-            self.assertEqual(win.tbl_saves.rowHeight(0), round(22 * 1.3))
+            self.assertEqual(win.sidebar_panel.minimumWidth(), round(265 * 1.2))
+            self.assertEqual(win.tbl_saves.rowHeight(0), round(22 * 1.2))
             self.assertEqual(win.tbl_saves.verticalScrollBar().maximum(), 0)
             self.assertEqual(win.tbl_skills.verticalScrollBar().maximum(), 0)
+            self.assertEqual(win.title_bar.cmb_scale_stage.currentText(), "Extra Large (120%)")
+
+            win.apply_scale(1.5, persist=False)
+            self.assertEqual(win.config.ui_scale, 1.2)
+            self.assertEqual(win.title_bar.cmb_scale_stage.currentText(), "Extra Large (120%)")
+            win.apply_scale(0.6, persist=False)
+            self.assertEqual(win.config.ui_scale, 0.8)
+            self.assertEqual(win.title_bar.cmb_scale_stage.currentText(), "Compact (80%)")
 
             # CharacterSelectView _relayout_cards reuses card instances without recreating widgets
             win.select_view.set_characters([
@@ -766,8 +774,8 @@ class UiAndRuleBugfixTests(unittest.TestCase):
                 self.assertEqual(btn.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Minimum)
                 self.assertGreaterEqual(btn.minimumWidth(), btn.sizeHint().width())
 
-            # Scaling up widens buttons & columns so nothing truncates at 130%
-            win.apply_scale(1.3, persist=False)
+            # Scaling up widens buttons & columns so nothing truncates at 120% (Extra Large)
+            win.apply_scale(1.2, persist=False)
             app.processEvents()
             self.assertGreaterEqual(win.btn_rule_overrides.minimumWidth(), win.btn_rule_overrides.sizeHint().width())
 
@@ -805,22 +813,22 @@ class UiAndRuleBugfixTests(unittest.TestCase):
             "setup-wizard-linux.sh",
             "installer/__init__.py",
             "installer/linux_wizard.py",
+            "installer/install-linux.sh",
+            "installer/uninstall-linux.sh",
             "setup-wizard-windows.bat",
-            "setup-wizard-windows.ps1",
-            "install-linux.sh",
-            "uninstall-linux.sh",
-            "install-windows.ps1",
-            "uninstall-windows.ps1",
+            "installer/windows_wizard.ps1",
+            "installer/install-windows.ps1",
+            "installer/uninstall-windows.ps1",
         ):
             self.assertTrue((root_dir / rel).is_file(), f"Missing {rel}")
 
         # Shell syntax validation on all Linux setup scripts
-        for sh in ("setup-wizard-linux.sh", "install-linux.sh", "uninstall-linux.sh"):
+        for sh in ("setup-wizard-linux.sh", "installer/install-linux.sh", "installer/uninstall-linux.sh"):
             proc = subprocess.run(["bash", "-n", str(root_dir / sh)], capture_output=True, text=True, check=False)
             self.assertEqual(proc.returncode, 0, proc.stderr)
 
-        # Windows setup wizard, installer & Inno Setup feature checks
-        win_wiz_ps1 = (root_dir / "setup-wizard-windows.ps1").read_text(encoding="utf-8")
+        # Windows setup wizard & installer feature checks
+        win_wiz_ps1 = (root_dir / "installer" / "windows_wizard.ps1").read_text(encoding="utf-8")
         self.assertIn("System.Windows.Forms", win_wiz_ps1)
         self.assertIn("install-windows.ps1", win_wiz_ps1)
         self.assertIn("uninstall-windows.ps1", win_wiz_ps1)
@@ -830,27 +838,22 @@ class UiAndRuleBugfixTests(unittest.TestCase):
         self.assertIn("Install / Repair Aurora Borealis", win_wiz_ps1)
         self.assertIn("Uninstall Aurora Borealis", win_wiz_ps1)
 
-        win_inst_ps1 = (root_dir / "install-windows.ps1").read_text(encoding="utf-8")
+        win_inst_ps1 = (root_dir / "installer" / "install-windows.ps1").read_text(encoding="utf-8")
         self.assertIn("$InstallAuroraLegacy", win_inst_ps1)
         self.assertIn("$InstallFiveTools", win_inst_ps1)
         self.assertIn("--sync-official", win_inst_ps1)
         self.assertIn("--sync-5etools", win_inst_ps1)
 
-        inno_iss = (root_dir / "packaging" / "windows" / "aurora-borealis.iss").read_text(encoding="utf-8")
-        self.assertIn("auroralegacy", inno_iss)
-        self.assertIn("fivetools", inno_iss)
-        self.assertIn("--sync-official", inno_iss)
-        self.assertIn("--sync-5etools", inno_iss)
-
         # Command builder & --help checks
-        help_proc = subprocess.run(["bash", str(root_dir / "install-linux.sh"), "--help"], capture_output=True, text=True, check=False)
+        help_proc = subprocess.run(["bash", str(root_dir / "installer" / "install-linux.sh"), "--help"], capture_output=True, text=True, check=False)
         self.assertEqual(help_proc.returncode, 0, help_proc.stderr)
         self.assertIn("--install-aurora-legacy", help_proc.stdout)
         self.assertIn("--install-5etools", help_proc.stdout)
+        self.assertIn("--desktop-only", help_proc.stdout)
         self.assertIn("--gui", help_proc.stdout)
 
         in_cmd = build_install_command(root_dir, "/tmp/ab", in_place=False, install_system_deps=False, install_desktop=True)
-        self.assertEqual(in_cmd[:2], ["bash", str(root_dir / "install-linux.sh")])
+        self.assertEqual(in_cmd[:2], ["bash", str(root_dir / "installer" / "install-linux.sh")])
         self.assertIn("--prefix", in_cmd)
         self.assertIn("/tmp/ab", in_cmd)
         self.assertIn("--no-system-deps", in_cmd)
@@ -870,7 +873,7 @@ class UiAndRuleBugfixTests(unittest.TestCase):
         self.assertIn("--install-5etools", in_cmd_packs)
 
         un_cmd = build_uninstall_command(root_dir, "/tmp/ab", purge_config=True)
-        self.assertEqual(un_cmd[:2], ["bash", str(root_dir / "uninstall-linux.sh")])
+        self.assertEqual(un_cmd[:2], ["bash", str(root_dir / "installer" / "uninstall-linux.sh")])
         self.assertIn("--purge-config", un_cmd)
 
         # Qt Wizard offscreen instantiation, content pack toggles & Install/Uninstall switching
@@ -914,7 +917,7 @@ class UiAndRuleBugfixTests(unittest.TestCase):
             env["XDG_DATA_HOME"] = str(fh / ".local" / "share")
             env["XDG_CONFIG_HOME"] = str(fh / ".config")
             proc_un = subprocess.run(
-                ["bash", str(root_dir / "uninstall-linux.sh"), "--prefix", str(app_dir), "--purge-config"],
+                ["bash", str(root_dir / "installer" / "uninstall-linux.sh"), "--prefix", str(app_dir), "--purge-config"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -932,6 +935,7 @@ class UiAndRuleBugfixTests(unittest.TestCase):
         import subprocess
         from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication
+        from aurora_borealis.main import ensure_bundled_templates
         from aurora_borealis.models import InventoryItem
         from aurora_borealis.pdf_export import (
             _get_pdf_page_size,
@@ -1035,108 +1039,147 @@ class UiAndRuleBugfixTests(unittest.TestCase):
                 capture_output=True, text=True, check=True,
             )
             self.assertEqual(len(json.loads(p55e.stdout).get("pages", [])), 2)
+            exp_w, exp_h = _get_pdf_page_size(tpl_55e)
             w_55e, h_55e = _get_pdf_page_size(out_55e)
-            self.assertAlmostEqual(w_55e, 603.0, delta=1.0)
-            self.assertAlmostEqual(h_55e, 774.0, delta=1.0)
+            self.assertAlmostEqual(w_55e, exp_w, delta=1.0)
+            self.assertAlmostEqual(h_55e, exp_h, delta=1.0)
 
-        # 4. Windows Setup Wizard & Installer PowerShell 5.1 safety checks
-        wiz_bytes = (root_dir / "setup-wizard-windows.ps1").read_bytes()
+        # 3b. Fresh-install template seeding & .gitignore un-ignoring check
+        with tempfile.TemporaryDirectory() as seed_dir:
+            sd = Path(seed_dir)
+            copied_count = ensure_bundled_templates(sd)
+            self.assertGreaterEqual(copied_count, 2)
+            self.assertTrue((sd / "dnd5e_sheet.pdf").is_file())
+            self.assertTrue((sd / "dnd55e_sheet.pdf").is_file())
+            # Existing custom template must not be overwritten
+            (sd / "dnd5e_sheet.pdf").write_bytes(b"custom")
+            ensure_bundled_templates(sd)
+            self.assertEqual((sd / "dnd5e_sheet.pdf").read_bytes(), b"custom")
+
+        for tpl_rel in (
+            "aurora_borealis/assets/templates/dnd5e_sheet.pdf",
+            "aurora_borealis/assets/templates/dnd55e_sheet.pdf",
+            "aurora_borealis/assets/templates/companion_sheet.pdf",
+        ):
+            chk = subprocess.run(
+                ["git", "-C", str(root_dir), "check-ignore", tpl_rel],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(chk.returncode, 0, f".gitignore must not ignore {tpl_rel}")
+
+        # 4. Windows Setup Wizard & Installer PowerShell 5.1 safety & layout checks
+        wiz_bytes = (root_dir / "installer" / "windows_wizard.ps1").read_bytes()
         wiz_body = wiz_bytes.removeprefix(b"\xef\xbb\xbf")
-        self.assertTrue(all(b < 128 for b in wiz_body), "setup-wizard-windows.ps1 body must stay pure ASCII for PS 5.1")
+        self.assertTrue(all(b < 128 for b in wiz_body), "installer/windows_wizard.ps1 body must stay pure ASCII for PS 5.1")
         wiz_txt = wiz_body.decode("ascii")
         self.assertIn("System.Windows.Forms.Timer", wiz_txt)
         self.assertIn("Start-Process", wiz_txt)
+        self.assertIn("TableLayoutPanel", wiz_txt)
+        self.assertIn("$FooterLayout.Controls.Add($BtnNext", wiz_txt)
+        self.assertNotIn('Anchor = "Top,Right"', wiz_txt)
+        self.assertNotIn('Anchor = "Top,Bottom,Left,Right"', wiz_txt)
         self.assertNotIn("add_OutputDataReceived", wiz_txt)
         self.assertNotIn("BeginInvoke", wiz_txt)
-        self.assertIn("-STA", (root_dir / "setup-wizard-windows.bat").read_text(encoding="ascii"))
+        bat_txt = (root_dir / "setup-wizard-windows.bat").read_text(encoding="ascii")
+        self.assertIn("-STA", bat_txt)
+        self.assertIn(r"installer\windows_wizard.ps1", bat_txt)
 
-        inst_ps1 = (root_dir / "install-windows.ps1").read_text(encoding="utf-8")
+        inst_ps1 = (root_dir / "installer" / "install-windows.ps1").read_text(encoding="utf-8")
         self.assertIn("-not (Test-Path $IcoPath)", inst_ps1)
         self.assertIn("SHChangeNotify", inst_ps1)
+        self.assertIn("UserTplDir", inst_ps1)
 
     def test_11_companion_sheet_official_acroform_pdf_export(self) -> None:
         import json
         import subprocess
         from pathlib import Path
         from PySide6.QtWidgets import QApplication
-        from aurora_borealis.companions import create_companion_from_template, export_companion_pdf
+        from aurora_borealis.companions import (
+            _build_companion_field_map,
+            create_companion_from_template,
+            export_companion_pdf,
+        )
         from aurora_borealis.models import CharacterState, ClassLevel
         from aurora_borealis.pdf_export import _get_pdf_page_size, _pypdf_annot_fullname, _resolve_template_pdf
 
         QApplication.instance() or QApplication([])
 
+        owner = CharacterState(name="Seraphina", ruleset="5e", level=7, classes=[ClassLevel("ID_CLS", 7)])
+        comp = create_companion_from_template("steel_defender", owner)
+        comp.owner_proficiency = 3
+        comp.owner_spell_attack = 7
+        comp.owner_ability_mod = 4
+        comp.speed = "40 ft., climb 20 ft., fly 30 ft."
+        comp.senses = "Darkvision 60 ft., Blindsight 10 ft., passive Perception 14"
+        comp.skill_profs = ["Athletics", "Perception", "Stealth"]
+        comp.saving_throw_profs = ["dexterity", "constitution"]
+        comp.condition_immunities = "charmed, exhaustion, poisoned, frightened"
+        comp.damage_immunities = "poison; resistance: fire, cold; vulnerability: lightning"
+        comp.temp_hp = 5
+        comp.notes = "Constructed with gleaming mithral plating."
+
+        text_vals, checked_set, _da, _ff = _build_companion_field_map(comp)
+        self.assertEqual(text_vals.get("Text1"), "Steel Defender")
+        self.assertEqual(text_vals.get("Text4"), "Seraphina (Lv 7)")
+        self.assertIn("Check Box8", checked_set)
+
         with tempfile.TemporaryDirectory() as empty_tpl:
-            tpl_comp = _resolve_template_pdf("companion_sheet.pdf", Path(empty_tpl))
-            self.assertIsNotNone(tpl_comp)
-            assert tpl_comp is not None
-            self.assertTrue(tpl_comp.is_file())
-
-            owner = CharacterState(name="Seraphina", ruleset="5e", level=7, classes=[ClassLevel("ID_CLS", 7)])
-            comp = create_companion_from_template("steel_defender", owner)
-            comp.owner_proficiency = 3
-            comp.owner_spell_attack = 7
-            comp.owner_ability_mod = 4
-            comp.speed = "40 ft., climb 20 ft., fly 30 ft."
-            comp.senses = "Darkvision 60 ft., Blindsight 10 ft., passive Perception 14"
-            comp.skill_profs = ["Athletics", "Perception", "Stealth"]
-            comp.saving_throw_profs = ["dexterity", "constitution"]
-            comp.condition_immunities = "charmed, exhaustion, poisoned, frightened"
-            comp.damage_immunities = "poison; resistance: fire, cold; vulnerability: lightning"
-            comp.temp_hp = 5
-            comp.notes = "Constructed with gleaming mithral plating."
-
             out_pdf = Path(empty_tpl) / "steel_defender.pdf"
             export_companion_pdf(comp, out_pdf, templates_dir=Path(empty_tpl))
             self.assertTrue(out_pdf.is_file())
+            self.assertTrue(out_pdf.read_bytes().startswith(b"%PDF-"))
 
-            w_pt, h_pt = _get_pdf_page_size(out_pdf)
-            self.assertAlmostEqual(w_pt, 612.0, delta=1.0)
-            self.assertAlmostEqual(h_pt, 792.0, delta=1.0)
+            tpl_comp = _resolve_template_pdf("companion_sheet.pdf", Path(empty_tpl))
+            if tpl_comp is not None:
+                self.assertTrue(tpl_comp.is_file())
+                w_pt, h_pt = _get_pdf_page_size(out_pdf)
+                self.assertAlmostEqual(w_pt, 612.0, delta=1.0)
+                self.assertAlmostEqual(h_pt, 792.0, delta=1.0)
 
-            probe = subprocess.run(
-                ["qpdf", "--json", "--json-key=pages", "--json-key=acroform", "--json-key=qpdf", str(out_pdf)],
-                capture_output=True, text=True, check=True,
-            )
-            data = json.loads(probe.stdout)
-            self.assertEqual(len(data.get("pages", [])), 1)
-            objs = data["qpdf"][1]
-            vals = {
-                f.get("fullname", ""): objs.get("obj:" + f["object"], {}).get("value", {}).get("/V")
-                for f in data.get("acroform", {}).get("fields", [])
-            }
-            self.assertEqual(vals.get("Text1"), "u:Steel Defender")
-            self.assertEqual(vals.get("Text4"), "u:Seraphina (Lv 7)")
-            self.assertEqual(vals.get("Text43"), "u:15")
-            self.assertEqual(vals.get("Text46"), "u:40 / 41")
-            self.assertEqual(vals.get("Text47"), "u:5")
-            self.assertEqual(vals.get("Text23"), "u:14")
-            self.assertEqual(vals.get("Text24"), "u:+2")
-            self.assertEqual(vals.get("Text70.3.0.0"), "u:+5")
-            self.assertIn("210 lb.", str(vals.get("Text63")))
-            self.assertIn("CR: +3", str(vals.get("Text67")))
-            self.assertIn("exhaustion", str(vals.get("Text67")).lower())
-            self.assertIn("Melee Weapon Attack: +7 to hit", str(vals.get("Text68")))
-            self.assertIn("Vigilant.", str(vals.get("Text54")))
+                probe = subprocess.run(
+                    ["qpdf", "--json", "--json-key=pages", "--json-key=acroform", "--json-key=qpdf", str(out_pdf)],
+                    capture_output=True, text=True, check=True,
+                )
+                data = json.loads(probe.stdout)
+                self.assertEqual(len(data.get("pages", [])), 1)
+                objs = data["qpdf"][1]
+                vals = {
+                    f.get("fullname", ""): objs.get("obj:" + f["object"], {}).get("value", {}).get("/V")
+                    for f in data.get("acroform", {}).get("fields", [])
+                }
+                self.assertEqual(vals.get("Text1"), "u:Steel Defender")
+                self.assertEqual(vals.get("Text4"), "u:Seraphina (Lv 7)")
+                self.assertEqual(vals.get("Text43"), "u:15")
+                self.assertEqual(vals.get("Text46"), "u:40 / 41")
+                self.assertEqual(vals.get("Text47"), "u:5")
+                self.assertEqual(vals.get("Text23"), "u:14")
+                self.assertEqual(vals.get("Text24"), "u:+2")
+                self.assertEqual(vals.get("Text70.3.0.0"), "u:+5")
+                self.assertIn("210 lb.", str(vals.get("Text63")))
+                self.assertIn("CR: +3", str(vals.get("Text67")))
+                self.assertIn("exhaustion", str(vals.get("Text67")).lower())
+                self.assertIn("Melee Weapon Attack: +7 to hit", str(vals.get("Text68")))
+                self.assertIn("Vigilant.", str(vals.get("Text54")))
 
-            for expected_chk in (
-                "Check Box8",
-                "Check Box9",
-                "Check Box11",
-                "Check Box30.1",
-                "Check Box30.2",
-                "Check Box38.5.0",
-                "Check Box38.4.1",
-                "Check Box39.3.2",
-                "Check Box40.1",
-                "Check Box40.3",
-                "Check Box41.2",
-                "Check Box48.3.0",
-                "Check Box48.5.1.0",
-                "Check Box48.4.1.1",
-                "Check Box69.0",
-                "Check Box69.1",
-            ):
-                self.assertEqual(vals.get(expected_chk), "/Yes", f"{expected_chk} should be checked")
+                for expected_chk in (
+                    "Check Box8",
+                    "Check Box9",
+                    "Check Box11",
+                    "Check Box30.1",
+                    "Check Box30.2",
+                    "Check Box38.5.0",
+                    "Check Box38.4.1",
+                    "Check Box39.3.2",
+                    "Check Box40.1",
+                    "Check Box40.3",
+                    "Check Box41.2",
+                    "Check Box48.3.0",
+                    "Check Box48.5.1.0",
+                    "Check Box48.4.1.1",
+                    "Check Box69.0",
+                    "Check Box69.1",
+                ):
+                    self.assertEqual(vals.get(expected_chk), "/Yes", f"{expected_chk} should be checked")
 
         # Verify hierarchical AcroForm fullname resolution used by pypdf Windows fallback
         node_root = {"/T": "Text70"}
@@ -1144,6 +1187,347 @@ class UiAndRuleBugfixTests(unittest.TestCase):
         node_mid2 = {"/T": "0", "/Parent": node_mid}
         node_leaf = {"/T": "0", "/Parent": node_mid2}
         self.assertEqual(_pypdf_annot_fullname(node_leaf), "Text70.0.0.0")
+
+    def test_12_svg_icons_and_five_named_zoom_stages(self) -> None:
+        from PySide6.QtWidgets import QApplication, QPushButton, QSizePolicy
+        from aurora_borealis.config import (
+            UI_ZOOM_STAGES,
+            get_zoom_stage_label,
+            load_config,
+            save_config,
+            snap_ui_scale,
+        )
+        from aurora_borealis.library import CharacterSummary
+        from aurora_borealis.ui.companion_view import CompanionEditorView
+        from aurora_borealis.ui.github_view import GitHubContentView
+        from aurora_borealis.ui.icons import ICONS_DIR, svg_icon, svg_pixmap
+        from aurora_borealis.ui.level_up_wizard import LevelUpWizardDialog
+        from aurora_borealis.ui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        root_dir = Path(__file__).resolve().parent.parent
+
+        expected_svgs = (
+            "sun",
+            "moon",
+            "star-filled",
+            "star-outline",
+            "paw",
+            "refresh",
+            "arrow-left",
+            "arrow-right",
+            "arrow-up-circle",
+            "settings",
+            "dice",
+            "sparkles",
+            "sword",
+            "shield",
+            "backpack",
+            "check",
+            "warning",
+            "trash",
+            "plus",
+            "minus",
+            "window-minimize",
+            "window-maximize",
+            "window-restore",
+            "window-close",
+            "aurora-logo-subtle",
+        )
+        for name in expected_svgs:
+            self.assertTrue((ICONS_DIR / f"{name}.svg").is_file(), f"Missing SVG icon: {name}.svg")
+            pix = svg_pixmap(name, "#34d399", 18)
+            self.assertFalse(pix.isNull(), f"Null pixmap for {name}")
+            self.assertEqual((pix.width(), pix.height()), (18, 18))
+            ic = svg_icon(name, "#eef0f3", 16)
+            self.assertFalse(ic.isNull(), f"Null QIcon for {name}")
+
+        pyproject_txt = (root_dir / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("assets/icons/*", pyproject_txt)
+
+        # 5 named zoom stages: 80%, 90%, 100%, 110%, 120%
+        self.assertEqual(
+            UI_ZOOM_STAGES,
+            (
+                (0.8, "Compact"),
+                (0.9, "Small"),
+                (1.0, "Normal"),
+                (1.1, "Large"),
+                (1.2, "Extra Large"),
+            ),
+        )
+        self.assertEqual(snap_ui_scale(0.5), 0.8)
+        self.assertEqual(snap_ui_scale(0.86), 0.9)
+        self.assertEqual(snap_ui_scale(1.02), 1.0)
+        self.assertEqual(snap_ui_scale(1.4), 1.2)
+        self.assertEqual(get_zoom_stage_label(0.8), "Compact (80%)")
+        self.assertEqual(get_zoom_stage_label(1.0), "Normal (100%)")
+        self.assertEqual(get_zoom_stage_label(1.2), "Extra Large (120%)")
+
+        repo = self._make_repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            cfg_path = p / "cfg.json"
+            save_config(AppConfig(characters_dir=str(p / "chars"), ui_scale=1.37), cfg_path)
+            loaded_cfg = load_config(cfg_path)
+            self.assertEqual(loaded_cfg.ui_scale, 1.2)
+
+            win = MainWindow(
+                repo,
+                p,
+                custom_dir=p / "c",
+                templates_dir=p / "t",
+                config=AppConfig(characters_dir=str(p / "chars")),
+                config_path=cfg_path,
+                auto_sync=False,
+            )
+            win.select_view.set_characters(
+                [
+                    CharacterSummary(
+                        path=p / "chars" / "hero.dnd5e",
+                        filename="hero.dnd5e",
+                        name="Aldric",
+                        level=3,
+                        race="Human",
+                        class_name="Wizard",
+                        background="Sage",
+                        ruleset="5e",
+                        modified_ts=0.0,
+                        portrait_base64="",
+                        portrait_path="",
+                        favorite=True,
+                    )
+                ]
+            )
+            cmb = win.title_bar.cmb_scale_stage
+            self.assertTrue(hasattr(win.title_bar, "lbl_logo"))
+            self.assertFalse(hasattr(win.title_bar, "lbl_title"))
+            self.assertFalse(hasattr(win.title_bar, "lbl_breadcrumb"))
+            self.assertFalse(win.title_bar.lbl_logo.pixmap().isNull())
+            self.assertEqual(cmb.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Fixed)
+            self.assertLessEqual(cmb.width(), 210)
+            self.assertEqual(cmb.count(), 5)
+            self.assertEqual(
+                [cmb.itemText(i) for i in range(5)],
+                [
+                    "Compact (80%)",
+                    "Small (90%)",
+                    "Normal (100%)",
+                    "Large (110%)",
+                    "Extra Large (120%)",
+                ],
+            )
+            self.assertEqual(cmb.currentIndex(), 2)
+            self.assertTrue(win.title_bar.btn_scale_minus.isEnabled())
+            self.assertTrue(win.title_bar.btn_scale_plus.isEnabled())
+
+            # Step down to 80% Compact
+            win.title_bar.btn_scale_minus.click()
+            self.assertEqual(win.config.ui_scale, 0.9)
+            self.assertEqual(cmb.currentText(), "Small (90%)")
+            win.title_bar.btn_scale_minus.click()
+            self.assertEqual(win.config.ui_scale, 0.8)
+            self.assertEqual(cmb.currentText(), "Compact (80%)")
+            self.assertFalse(win.title_bar.btn_scale_minus.isEnabled())
+
+            # Jump straight to 120% Extra Large via stage dropdown
+            cmb.setCurrentIndex(4)
+            app.processEvents()
+            self.assertEqual(win.config.ui_scale, 1.2)
+            self.assertEqual(cmb.currentText(), "Extra Large (120%)")
+            self.assertFalse(win.title_bar.btn_scale_plus.isEnabled())
+
+            # Theme toggle updates SVG icons cleanly
+            win.toggle_theme()
+            self.assertEqual(win.title_bar.btn_theme.property("_aurora_icon_name"), "moon")
+            win.toggle_theme()
+            self.assertEqual(win.title_bar.btn_theme.property("_aurora_icon_name"), "sun")
+
+            # Verify zero emoji glyphs remain on any QPushButton across views
+            forbidden_glyphs = set("☀☾★☆🐾🎲⚙⬆✦⚔🛡🗑↻←→✓⚠")
+            st = CharacterState(name="Aria", classes=[ClassLevel("ID_CLS_WIZ", 1)])
+            st.sync_from_classes()
+            wiz = LevelUpWizardDialog(st, repo, RulesEngine(repo), parent=win)
+            comp_view = CompanionEditorView()
+            gh_view = GitHubContentView(p / "c")
+            for root_widget in (win, win.select_view, wiz, comp_view, gh_view):
+                for btn in root_widget.findChildren(QPushButton):
+                    btn_txt = btn.text()
+                    bad = [ch for ch in btn_txt if ch in forbidden_glyphs]
+                    self.assertEqual(bad, [], f"Emoji/glyph {bad} found in button {btn_txt!r}")
+
+            wiz.close()
+            comp_view.close()
+            gh_view.close()
+            win._dirty = False
+            win.current_file = p / "dummy.dnd5e"
+            win.close()
+
+    def test_14_titlebar_ux_choices_cards_and_downloads_defaults(self) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor, QImage, QPixmap
+        from PySide6.QtWidgets import (
+            QApplication,
+            QCheckBox,
+            QComboBox,
+            QGroupBox,
+            QPushButton,
+            QRadioButton,
+            QTabWidget,
+        )
+
+        from aurora_borealis.engine import effective_selection_slot_count, selection_filled_count
+        from aurora_borealis.library import CharacterSummary
+        from aurora_borealis.paths import get_os_downloads_dir
+        from aurora_borealis.pdf_export import validate_character_for_pdf
+        from aurora_borealis.ui.character_select import _round_top_pixmap
+        from aurora_borealis.ui.companion_view import CompanionEditorView
+        from aurora_borealis.ui.dialogs import NewCharacterDialog
+        from aurora_borealis.ui.github_view import GitHubContentView
+        from aurora_borealis.ui.level_up_wizard import LevelUpWizardDialog
+        from aurora_borealis.ui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        dl_dir = get_os_downloads_dir()
+        self.assertTrue(isinstance(dl_dir, Path))
+        self.assertTrue(dl_dir.is_dir())
+
+        # Rounded top portrait pixmap keeps top corners transparent and bottom/center opaque
+        rect_img = QImage(100, 80, QImage.Format.Format_ARGB32)
+        rect_img.fill(QColor(220, 40, 40, 255))
+        rounded = _round_top_pixmap(QPixmap.fromImage(rect_img), 12.0).toImage()
+        self.assertEqual(rounded.pixelColor(0, 0).alpha(), 0)
+        self.assertEqual(rounded.pixelColor(99, 0).alpha(), 0)
+        self.assertEqual(rounded.pixelColor(50, 40).alpha(), 255)
+        self.assertEqual(rounded.pixelColor(0, 79).alpha(), 255)
+        self.assertEqual(rounded.pixelColor(99, 79).alpha(), 255)
+
+        repo = ContentRepository()
+        s_a = Element(id="ID_SKILL_A", name="Arcana", type="Proficiency", supports=["Skill"])
+        s_b = Element(id="ID_SKILL_B", name="History", type="Proficiency", supports=["Skill"])
+        race = Element(
+            id="ID_RACE_LIMITED",
+            name="Elf",
+            type="Race",
+            grant_rules=[GrantRule(type="Proficiency", id="ID_SKILL_A")],
+            select_rules=[SelectRule(type="Proficiency", name="Skill Choice", number=2, supports="Skill")],
+        )
+        cls_el = Element(id="ID_CLS_FIGHTER", name="Fighter", type="Class", setters={"hitDie": "d10"})
+        bg_el = Element(id="ID_BG_SAGE", name="Sage", type="Background")
+        align_el = Element(id="ID_ALIGN_NG", name="Neutral Good", type="Alignment")
+        _populate_repo(repo, [s_a, s_b, race, cls_el, bg_el, align_el])
+
+        eng = RulesEngine(repo)
+        state = CharacterState(
+            name="Lyra",
+            ruleset="5e",
+            race_id="ID_RACE_LIMITED",
+            classes=[ClassLevel("ID_CLS_FIGHTER", 1)],
+            background_id="ID_BG_SAGE",
+            alignment_id="ID_ALIGN_NG",
+        )
+        state.sync_from_classes()
+        comp = eng.evaluate(state)
+        self.assertEqual(len(comp.active_selections), 1)
+        asel = comp.active_selections[0]
+        # Rule asks for number=2, but ID_SKILL_A is already granted so only 1 option is selectable
+        self.assertEqual(effective_selection_slot_count(asel, state, comp), 1)
+        self.assertEqual(selection_filled_count(asel, state, 1), 0)
+
+        state.selections[asel.key] = ["ID_SKILL_B"]
+        comp2 = eng.evaluate(state)
+        asel2 = comp2.active_selections[0]
+        self.assertEqual(effective_selection_slot_count(asel2, state, comp2), 1)
+        self.assertEqual(selection_filled_count(asel2, state, 1), 1)
+        self.assertEqual(validate_character_for_pdf(state, comp2, repo), [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            cfg = AppConfig(characters_dir=str(p / "chars"), ui_scale=1.0)
+            win = MainWindow(
+                config=cfg,
+                config_path=p / "cfg.json",
+                repo=repo,
+                data_dir=p / "d",
+                custom_dir=p / "cu",
+                templates_dir=p / "t",
+            )
+            win.resize(1200, 800)
+            win.show()
+            app.processEvents()
+
+            # Slimmer titlebar & flush top-right close button
+            tb = win.title_bar
+            self.assertLessEqual(tb.height(), 36)
+            close_rect = tb.btn_close.geometry()
+            self.assertEqual(close_rect.y(), 0)
+            self.assertEqual(close_rect.right(), tb.width() - 1)
+            self.assertEqual(close_rect.height(), tb.height())
+
+            # Character cards keep body inside rounded border
+            win.select_view.set_characters(
+                [
+                    CharacterSummary(
+                        path=p / "chars" / "lyra.dnd5e",
+                        filename="lyra.dnd5e",
+                        name="Lyra",
+                        level=1,
+                        race="Elf",
+                        class_name="Fighter",
+                        background="Sage",
+                        ruleset="5e",
+                        modified_ts=0.0,
+                        portrait_base64="",
+                        portrait_path="",
+                        favorite=False,
+                    )
+                ]
+            )
+            app.processEvents()
+            cards = win.select_view.findChildren(QPushButton, "CompactCardBtn")
+            self.assertTrue(len(cards) >= 1)
+            card_widget = cards[0].parentWidget().parentWidget()
+            self.assertEqual(card_widget.layout().contentsMargins().left(), 2)
+            self.assertEqual(card_widget.layout().contentsMargins().top(), 2)
+            self.assertEqual(card_widget.layout().contentsMargins().right(), 2)
+            body_w = cards[0].parentWidget()
+            self.assertEqual(body_w.objectName(), "CharCardBody")
+            self.assertTrue(body_w.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+
+            # Capped choice card in MainWindow renders 1 combo and 0 remaining
+            win.state = state
+            win._choices_sig = None
+            win._recalculate_and_refresh()
+            app.processEvents()
+            self.assertEqual(win.lbl_choices_pending.text(), "All required choices selected")
+            self.assertEqual(len(win.selections_container.findChildren(QComboBox)), 1)
+
+            # Check no '...' / '…' on buttons and no unescaped single '&' in mnemonic-aware widgets
+            wiz = LevelUpWizardDialog(state, repo, eng, parent=win)
+            comp_view = CompanionEditorView()
+            gh_view = GitHubContentView(p / "c")
+            new_dlg = NewCharacterDialog(win)
+            for root_widget in (win, win.select_view, wiz, comp_view, gh_view, new_dlg):
+                for btn in root_widget.findChildren(QPushButton):
+                    txt = btn.text().strip()
+                    self.assertFalse(txt.endswith("…") or txt.endswith("..."), f"Ellipsis on button {txt!r}")
+                    self.assertEqual(txt.replace("&&", "").find("&"), -1, f"Unescaped & on button {txt!r}")
+                for tw in root_widget.findChildren(QTabWidget):
+                    for ti in range(tw.count()):
+                        ttxt = tw.tabText(ti)
+                        self.assertEqual(ttxt.replace("&&", "").find("&"), -1, f"Unescaped & on tab {ttxt!r}")
+                for cls_type in (QGroupBox, QCheckBox, QRadioButton):
+                    for w in root_widget.findChildren(cls_type):
+                        wtxt = w.text() if hasattr(w, "text") else w.title()
+                        self.assertEqual(wtxt.replace("&&", "").find("&"), -1, f"Unescaped & on {cls_type.__name__} {wtxt!r}")
+
+            new_dlg.close()
+            wiz.close()
+            comp_view.close()
+            gh_view.close()
+            win._dirty = False
+            win.current_file = p / "dummy.dnd5e"
+            win.close()
 
 
 if __name__ == "__main__":

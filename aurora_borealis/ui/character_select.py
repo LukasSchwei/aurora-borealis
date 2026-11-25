@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -19,9 +19,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..config import snap_ui_scale
 from ..library import CharacterSummary
 from .dialogs import pixmap_from_portrait
-from .ui_helpers import ensure_widgets_fit, fit_button
+from .icons import apply_button_icon, refresh_themed_icons
+from .ui_helpers import ensure_widgets_fit, fit_button, refit_buttons
 
 
 class _ClickableCard(QFrame):
@@ -31,6 +33,32 @@ class _ClickableCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+
+def _round_top_pixmap(pix: QPixmap, radius: float) -> QPixmap:
+    """Return a copy of pix with rounded top-left and top-right corners inside transparent background."""
+    if pix.isNull() or radius <= 0:
+        return pix
+    out = QPixmap(pix.size())
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    w = float(pix.width())
+    h = float(pix.height())
+    r = min(float(radius), w * 0.5, h * 0.5)
+    path = QPainterPath()
+    path.moveTo(0.0, h)
+    path.lineTo(0.0, r)
+    path.quadTo(0.0, 0.0, r, 0.0)
+    path.lineTo(w - r, 0.0)
+    path.quadTo(w, 0.0, w, r)
+    path.lineTo(w, h)
+    path.closeSubpath()
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, pix)
+    painter.end()
+    return out
 
 
 class CharacterSelectView(QWidget):
@@ -54,6 +82,7 @@ class CharacterSelectView(QWidget):
         super().__init__(parent)
         self._summaries: list[CharacterSummary] = []
         self._filter_mode = "all"
+        self._theme: str = "dark"
         self._ui_scale: float = 1.0
         self._last_cols: int = 4
         self._cards: list[QWidget] = []
@@ -61,8 +90,11 @@ class CharacterSelectView(QWidget):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(50)
         self._resize_timer.timeout.connect(self._relayout_cards)
-        self._trash_icon_path = Path(__file__).resolve().parent.parent / "assets" / "trash-bin.svg"  # "all" or "fav"
         self._build_ui()
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = "light" if str(theme).lower() == "light" else "dark"
+        refresh_themed_icons(self, self._theme)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -122,9 +154,10 @@ class CharacterSelectView(QWidget):
         sub_layout.addWidget(QLabel("Characters Folder:"))
         self.lbl_folder = QLabel("")
         self.lbl_folder.setObjectName("FolderChip")
-        btn_change = QPushButton("Change Folder…")
+        btn_change = QPushButton("Change Folder")
         btn_change.clicked.connect(self.change_folder_requested.emit)
-        btn_refresh = QPushButton("↻ Refresh")
+        btn_refresh = QPushButton("Refresh")
+        apply_button_icon(btn_refresh, "refresh", theme=self._theme, size=15)
         btn_refresh.clicked.connect(self.refresh_requested.emit)
 
         sub_layout.addWidget(self.lbl_folder)
@@ -140,9 +173,11 @@ class CharacterSelectView(QWidget):
         self.btn_all = QPushButton("All (0)")
         self.btn_all.setObjectName("PrimaryBtn")
         self.btn_all.clicked.connect(lambda: self._set_filter("all"))
-        self.btn_fav = QPushButton("★ Favorites (0)")
+        self.btn_fav = QPushButton("Favorites (0)")
+        apply_button_icon(self.btn_fav, "star-filled", theme=self._theme, size=15)
         self.btn_fav.clicked.connect(lambda: self._set_filter("fav"))
-        self.btn_comp = QPushButton("🐾 Companions (0)")
+        self.btn_comp = QPushButton("Companions (0)")
+        apply_button_icon(self.btn_comp, "paw", theme=self._theme, size=15)
         self.btn_comp.clicked.connect(lambda: self._set_filter("comp"))
 
         sub_layout.addWidget(self.txt_search)
@@ -183,8 +218,8 @@ class CharacterSelectView(QWidget):
         fav_count = sum(1 for s in summaries if s.favorite)
         comp_count = sum(1 for s in summaries if s.entry_kind == "companion")
         self.btn_all.setText(f"All ({len(summaries)})")
-        self.btn_fav.setText(f"★ Favorites ({fav_count})")
-        self.btn_comp.setText(f"🐾 Companions ({comp_count})")
+        self.btn_fav.setText(f"Favorites ({fav_count})")
+        self.btn_comp.setText(f"Companions ({comp_count})")
         fit_button(self.btn_all)
         fit_button(self.btn_fav)
         fit_button(self.btn_comp)
@@ -198,10 +233,11 @@ class CharacterSelectView(QWidget):
         for btn in (self.btn_all, self.btn_fav, self.btn_comp):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
+        refresh_themed_icons(self, self._theme)
         self._render_cards()
 
     def set_ui_scale(self, scale: float) -> None:
-        clamped = max(0.85, min(1.5, float(scale)))
+        clamped = snap_ui_scale(scale)
         if abs(clamped - self._ui_scale) < 1e-4:
             return
         self._ui_scale = clamped
@@ -236,7 +272,7 @@ class CharacterSelectView(QWidget):
         for idx, card in enumerate(self._cards):
             r, c = divmod(idx, cols)
             self.grid.addWidget(card, r, c)
-        ensure_widgets_fit(self.grid_host)
+        refit_buttons(self.grid_host)
         self.grid_host.setUpdatesEnabled(True)
 
     def _render_cards(self) -> None:
@@ -279,7 +315,7 @@ class CharacterSelectView(QWidget):
         for idx, card in enumerate(self._cards):
             r, c = divmod(idx, cols)
             self.grid.addWidget(card, r, c)
-        ensure_widgets_fit(self.grid_host)
+        refit_buttons(self.grid_host)
         self.grid_host.setUpdatesEnabled(True)
 
     def _make_card(self, s: CharacterSummary, card_sz: int) -> QFrame:
@@ -294,10 +330,11 @@ class CharacterSelectView(QWidget):
         card.setFixedSize(card_sz, card_sz)
 
         vbox = QVBoxLayout(card)
-        vbox.setContentsMargins(0, 0, 0, 10)
+        vbox.setContentsMargins(2, 2, 2, 10)
         vbox.setSpacing(6)
 
         # Main portrait square-ish area (~60% of the card height)
+        portrait_w = max(40, card_sz - 4)
         portrait_h = round(card_sz * 0.58)
         portrait_btn = QPushButton()
         portrait_btn.setObjectName("CharPortraitBtn")
@@ -308,16 +345,17 @@ class CharacterSelectView(QWidget):
         pix = pixmap_from_portrait(s.portrait_base64, s.portrait_path, size=card_sz)
         if pix:
             scaled = pix.scaled(
-                card_sz - 2,
+                portrait_w,
                 portrait_h,
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            x_off = max(0, (scaled.width() - (card_sz - 2)) // 2)
+            x_off = max(0, (scaled.width() - portrait_w) // 2)
             y_off = max(0, (scaled.height() - portrait_h) // 2)
-            cropped = scaled.copy(x_off, y_off, card_sz - 2, portrait_h)
-            portrait_btn.setIcon(QIcon(cropped))
-            portrait_btn.setIconSize(QSize(card_sz - 2, portrait_h))
+            cropped = scaled.copy(x_off, y_off, portrait_w, portrait_h)
+            rounded = _round_top_pixmap(cropped, max(8.0, 12.0 * self._ui_scale))
+            portrait_btn.setIcon(QIcon(rounded))
+            portrait_btn.setIconSize(QSize(portrait_w, portrait_h))
         else:
             initials = (s.name[:2] or "AB").upper()
             portrait_btn.setText(initials)
@@ -331,10 +369,16 @@ class CharacterSelectView(QWidget):
         pill.setObjectName("RulesetPill")
         pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        btn_fav = QPushButton("★" if s.favorite else "☆")
+        btn_fav = QPushButton("")
         btn_fav.setObjectName("FavBtn")
         btn_fav.setProperty("fav", "true" if s.favorite else "false")
         btn_fav.setFixedSize(28, 28)
+        apply_button_icon(
+            btn_fav,
+            "star-filled" if s.favorite else "star-outline",
+            size=18,
+            fixed_color="#f59e0b" if s.favorite else "#9aa0a6",
+        )
         btn_fav.clicked.connect(lambda: self.toggle_favorite_requested.emit(s.filename))
 
         overlay.addWidget(pill)
@@ -344,6 +388,8 @@ class CharacterSelectView(QWidget):
 
         # Compact info + actions footer
         body = QWidget()
+        body.setObjectName("CharCardBody")
+        body.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         body_l = QVBoxLayout(body)
         body_l.setContentsMargins(10, 0, 10, 0)
         body_l.setSpacing(4)
@@ -375,12 +421,8 @@ class CharacterSelectView(QWidget):
         btn_del = QPushButton()
         btn_del.setObjectName("TrashBtn")
         btn_del.setToolTip("Delete Character")
-        if self._trash_icon_path.is_file():
-            btn_del.setIcon(QIcon(str(self._trash_icon_path)))
-            icon_px = max(16, round(18 * self._ui_scale))
-            btn_del.setIconSize(QSize(icon_px, icon_px))
-        else:
-            btn_del.setText("🗑")
+        icon_px = max(16, round(18 * self._ui_scale))
+        apply_button_icon(btn_del, "trash", theme=self._theme, size=icon_px, fixed_color="#f87171")
         btn_del.clicked.connect(lambda: self.delete_character_requested.emit(s.path))
 
         footer.addWidget(btn_open, 1)

@@ -22,4 +22,7 @@ venv/
 # Local assets / exports
 *.msi
 *.dnd5e
+*.dnd55e
+*.dndcomp
 *.pdf
+!aurora_borealis/assets/templates/*.pdf

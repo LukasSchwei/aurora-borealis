@@ -65,8 +65,10 @@ def find_executable(name: str) -> Optional[str]:
     return None
 
 
-def get_windows_documents_dir() -> Optional[Path]:
-    """Query Windows Known Folder FOLDERID_Documents via SHGetKnownFolderPath."""
+def _get_windows_known_folder(
+    data1: int, data2: int, data3: int, data4: tuple[int, ...]
+) -> Optional[Path]:
+    """Query a Windows Known Folder GUID via SHGetKnownFolderPath."""
     if not is_windows():
         return None
     try:
@@ -81,17 +83,11 @@ def get_windows_documents_dir() -> Optional[Path]:
                 ("Data4", ctypes.c_ubyte * 8),
             ]
 
-        # FOLDERID_Documents: {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
-        docs_guid = _GUID(
-            0xFDD39AD0,
-            0x238F,
-            0x46AF,
-            (ctypes.c_ubyte * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7),
-        )
+        folder_guid = _GUID(data1, data2, data3, (ctypes.c_ubyte * 8)(*data4))
         ptr = ctypes.c_wchar_p()
         shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
         ole32 = ctypes.windll.ole32  # type: ignore[attr-defined]
-        hr = shell32.SHGetKnownFolderPath(ctypes.byref(docs_guid), 0, None, ctypes.byref(ptr))
+        hr = shell32.SHGetKnownFolderPath(ctypes.byref(folder_guid), 0, None, ctypes.byref(ptr))
         try:
             if hr == 0 and ptr.value:
                 cand = Path(ptr.value)
@@ -103,6 +99,22 @@ def get_windows_documents_dir() -> Optional[Path]:
     except Exception:
         return None
     return None
+
+
+def get_windows_documents_dir() -> Optional[Path]:
+    """Query Windows Known Folder FOLDERID_Documents via SHGetKnownFolderPath."""
+    # {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
+    return _get_windows_known_folder(
+        0xFDD39AD0, 0x238F, 0x46AF, (0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7)
+    )
+
+
+def get_windows_downloads_dir() -> Optional[Path]:
+    """Query Windows Known Folder FOLDERID_Downloads via SHGetKnownFolderPath."""
+    # {374DE290-123F-4565-9164-39C4925E467B}
+    return _get_windows_known_folder(
+        0x374DE290, 0x123F, 0x4565, (0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B)
+    )
 
 
 def configure_windows_app_id(app_id: str = "AuroraBorealis.CharacterBuilder") -> None:

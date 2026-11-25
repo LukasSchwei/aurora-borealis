@@ -1,15 +1,20 @@
-﻿param(
+param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Aurora Borealis\app"),
     [switch]$InPlace,
     [switch]$CreateDesktopShortcut = $true,
+    [switch]$NoDesktopShortcut,
     [switch]$RegisterFileAssociations = $true,
+    [switch]$NoFileAssociations,
     [switch]$SkipWinget,
     [switch]$InstallAuroraLegacy,
     [switch]$InstallFiveTools
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$InstallerDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoDir = Split-Path -Parent $InstallerDir
+$DoDesktopShortcut = ([bool]$CreateDesktopShortcut) -and (-not $NoDesktopShortcut.IsPresent)
+$DoFileAssociations = ([bool]$RegisterFileAssociations) -and (-not $NoFileAssociations.IsPresent)
 
 function Find-Python310 {
     if (Get-Command py -ErrorAction SilentlyContinue) {
@@ -57,7 +62,7 @@ if (-not $PythonCmd) {
         $PythonCmd = Find-Python310
     }
     if (-not $PythonCmd) {
-        Write-Error "Python 3.10+ is required. Install Python 3 from https://www.python.org/downloads/windows/ and re-run install-windows.bat."
+        Write-Error "Python 3.10+ is required. Install Python 3 from https://www.python.org/downloads/windows/ and re-run setup-wizard-windows.bat."
     }
 }
 Write-Host "[1/5] Using Python: $($PythonCmd -join ' ')"
@@ -74,7 +79,7 @@ if (-not $SkipWinget -and -not (Get-Command 7z -ErrorAction SilentlyContinue) -a
 }
 
 if ($InPlace) {
-    $TargetDir = $ScriptDir
+    $TargetDir = $RepoDir
     Write-Host "[2/5] Installing in-place at $TargetDir"
 } else {
     $TargetDir = $InstallDir
@@ -82,25 +87,21 @@ if ($InPlace) {
     New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
     $ItemsToCopy = @(
         "aurora_borealis",
+        "installer",
         "aurora-borealis.bat",
-        "aurora-borealis.ps1",
-        "install-windows.ps1",
-        "install-windows.bat",
-        "uninstall-windows.ps1",
-        "setup-wizard-windows.ps1",
         "setup-wizard-windows.bat",
         "pyproject.toml",
-        "requirements.txt",
         "README.md"
     )
     foreach ($item in $ItemsToCopy) {
-        $src = Join-Path $ScriptDir $item
+        $src = Join-Path $RepoDir $item
         if (Test-Path $src) {
             $dst = Join-Path $TargetDir $item
             if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
             Copy-Item -Recurse -Force $src $dst
         }
     }
+    Get-ChildItem -Path $TargetDir -Directory -Recurse -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "[3/5] Creating virtual environment and installing dependencies (PySide6, lxml, pypdf)..."
@@ -112,8 +113,22 @@ if ($PythonCmd.Count -eq 2) {
 }
 $VenvPy = Join-Path $VenvDir "Scripts\python.exe"
 & $VenvPy -m pip install --upgrade pip setuptools wheel
-& $VenvPy -m pip install -r (Join-Path $TargetDir "requirements.txt")
-& $VenvPy -m pip install --no-deps --no-build-isolation -e $TargetDir
+& $VenvPy -m pip install --no-build-isolation -e $TargetDir
+
+$BundledTplDir = Join-Path $TargetDir "aurora_borealis\assets\templates"
+$UserTplDir = Join-Path $env:LOCALAPPDATA "Aurora Borealis\templates"
+$SeededTpls = 0
+if (Test-Path $BundledTplDir) {
+    New-Item -ItemType Directory -Force -Path $UserTplDir | Out-Null
+    foreach ($pdf in (Get-ChildItem -Path $BundledTplDir -Filter "*.pdf" -File -ErrorAction SilentlyContinue)) {
+        $dstPdf = Join-Path $UserTplDir $pdf.Name
+        if (-not (Test-Path $dstPdf)) {
+            Copy-Item -Force $pdf.FullName $dstPdf
+        }
+        $SeededTpls++
+    }
+}
+Write-Host "  PDF Templates: $SeededTpls ready in $UserTplDir"
 
 Write-Host "[4/5] Preparing application icon (.ico) and shortcuts..."
 $SvgPath = Join-Path $TargetDir "aurora_borealis\assets\aurora-borealis.svg"
@@ -173,7 +188,7 @@ if (Test-Path $WizardLauncher) {
     $WizShortcut.Save()
 }
 
-if ($CreateDesktopShortcut) {
+if ($DoDesktopShortcut) {
     $DesktopDir = [Environment]::GetFolderPath("Desktop")
     $DeskShortcut = $WshShell.CreateShortcut((Join-Path $DesktopDir "Aurora Borealis.lnk"))
     $DeskShortcut.TargetPath = $LauncherPath
@@ -184,7 +199,7 @@ if ($CreateDesktopShortcut) {
     Write-Host "Created Desktop shortcut in $DesktopDir"
 }
 
-if ($RegisterFileAssociations) {
+if ($DoFileAssociations) {
     Write-Host "[5/5] Registering .dnd5e, .dnd55e, and .dndcomp file associations (HKCU)..."
     $ProgId = "AuroraBorealis.CharacterFile"
     $CmdStr = "`"$LauncherPath`" --open `"%1`""
@@ -213,7 +228,7 @@ Set-ItemProperty -Path $UninstallKey -Name "DisplayName" -Value "Aurora Borealis
 Set-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value "0.2.0"
 Set-ItemProperty -Path $UninstallKey -Name "Publisher" -Value "Aurora Borealis"
 Set-ItemProperty -Path $UninstallKey -Name "InstallLocation" -Value $TargetDir
-Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\setup-wizard-windows.ps1`" -InitialAction Uninstall"
+Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\installer\windows_wizard.ps1`" -InitialAction Uninstall"
 if (Test-Path $IcoPath) { Set-ItemProperty -Path $UninstallKey -Name "DisplayIcon" -Value "$IcoPath,0" }
 
 # Notify Windows Explorer to refresh shortcut & file association icon cache immediately

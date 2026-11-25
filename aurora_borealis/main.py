@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -23,6 +24,22 @@ from .ui.ui_helpers import install_global_wheel_filter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MSI_PATH = PROJECT_ROOT / "Aurora Setup.msi"
+BUNDLED_TEMPLATES_DIR = Path(__file__).resolve().parent / "assets" / "templates"
+
+
+def ensure_bundled_templates(templates_dir: Path) -> int:
+    """Copy bundled PDF templates into user templates_dir if not already present."""
+    templates_dir = Path(templates_dir)
+    if not BUNDLED_TEMPLATES_DIR.is_dir():
+        return 0
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for src in sorted(BUNDLED_TEMPLATES_DIR.glob("*.pdf")):
+        dst = templates_dir / src.name
+        if not dst.is_file():
+            shutil.copy2(src, dst)
+            copied += 1
+    return copied
 
 
 def ensure_elements_extracted(
@@ -30,6 +47,7 @@ def ensure_elements_extracted(
     templates_dir: Path,
     msi_path: Path,
 ) -> int:
+    ensure_bundled_templates(templates_dir)
     xml_files = list(elements_dir.glob("*.xml")) if elements_dir.is_dir() else []
     if xml_files and (templates_dir / "dnd5e_sheet.pdf").is_file():
         return len(xml_files)

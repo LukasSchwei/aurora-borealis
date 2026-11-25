@@ -43,6 +43,7 @@ from ..engine import parse_weight_lb
 from ..models import ABILITIES, ABILITY_ABBR, CharacterState, Element
 from ..loader import ContentRepository
 from ..models import DuplicateEntry, Element, InventoryItem
+from ..paths import get_os_downloads_dir
 from ..persistence import encode_portrait_file
 from .ui_helpers import ensure_widgets_fit
 
@@ -108,8 +109,8 @@ class NewCharacterDialog(QDialog):
 
         # Ruleset selection (5e vs 5.5e)
         rs_box = QVBoxLayout()
-        self.rad_5e = QRadioButton("D&D 5e (2014) — Classic racial ability bonuses & feats")
-        self.rad_55e = QRadioButton("D&D 5.5e (2024 Revised) — Background ASI (+2/+1) & Origin Feat")
+        self.rad_5e = QRadioButton("D&&D 5e (2014) — Classic racial ability bonuses && feats")
+        self.rad_55e = QRadioButton("D&&D 5.5e (2024 Revised) — Background ASI (+2/+1) && Origin Feat")
         self.rad_5e.setChecked(True)
         self._rs_group = QButtonGroup(self)
         self._rs_group.addButton(self.rad_5e)
@@ -126,7 +127,7 @@ class NewCharacterDialog(QDialog):
         self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         btn_col = QVBoxLayout()
-        btn_pick = QPushButton("Choose Portrait…")
+        btn_pick = QPushButton("Choose Portrait")
         btn_pick.clicked.connect(self._pick_portrait)
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self._clear_portrait)
@@ -153,7 +154,7 @@ class NewCharacterDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Character Portrait",
-            "",
+            str(get_os_downloads_dir()),
             "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
         )
         if not path:

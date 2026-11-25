@@ -111,7 +111,10 @@ def configure_dropdown_combo(cmb: QComboBox, max_visible: int = 14) -> None:
     cmb.setMaxVisibleItems(max_visible)
     cmb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
     cmb.setMinimumContentsLength(0)
-    cmb.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    if cmb.objectName() == "ScaleStageCombo":
+        cmb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    else:
+        cmb.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
     cmb.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     view = cmb.view()
     view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -150,6 +153,12 @@ def fit_button(btn: QPushButton) -> None:
     btn.ensurePolished()
     btn.updateGeometry()
     btn.setMinimumWidth(btn.sizeHint().width())
+
+
+def refit_buttons(root: QWidget) -> None:
+    """Lightweight button width refresh used during zoom stage changes."""
+    for btn in root.findChildren(QPushButton):
+        fit_button(btn)
 
 
 def ensure_widgets_fit(root: QWidget) -> None:

@@ -66,11 +66,19 @@ from ..companions import (
     render_companion_sheet_html,
     save_dndcomp,
 )
-from ..config import AppConfig, load_config, save_config
+from ..config import (
+    UI_ZOOM_STAGES,
+    AppConfig,
+    get_zoom_stage_index,
+    load_config,
+    save_config,
+    snap_ui_scale,
+)
 from ..engine import (
     RulesEngine,
     check_multiclass_prerequisites,
     class_display_summary,
+    effective_selection_slot_count,
     get_synthetic_asi_element,
     is_spell_concentration,
     is_spell_eligible_for_caster,
@@ -79,6 +87,7 @@ from ..engine import (
     level_for_xp,
     parse_hit_die,
     parse_weight_lb,
+    selection_filled_count,
     spell_classes,
     spell_school,
     sync_xp_to_level,
@@ -98,7 +107,7 @@ from ..models import (
     Element,
     InventoryItem,
 )
-from ..paths import get_config_path, get_custom_dir, get_templates_dir
+from ..paths import get_config_path, get_custom_dir, get_os_downloads_dir, get_templates_dir
 from ..pdf_export import export_character_pdf, validate_character_for_pdf
 from ..persistence import default_character_extension, encode_portrait_file, load_dnd5e, save_dnd5e
 from ..platform_utils import is_windows
@@ -122,9 +131,16 @@ from .dialogs import (
     pixmap_from_portrait,
 )
 from .github_view import GitHubContentView
+from .icons import apply_button_icon, refresh_themed_icons, svg_icon, svg_pixmap
 from .level_up_wizard import LevelUpWizardDialog
 from .styles import DARK_STYLESHEET, LIGHT_STYLESHEET, get_stylesheet
-from .ui_helpers import configure_dropdown_combo, ensure_widgets_fit, fit_button, install_global_wheel_filter
+from .ui_helpers import (
+    configure_dropdown_combo,
+    ensure_widgets_fit,
+    fit_button,
+    install_global_wheel_filter,
+    refit_buttons,
+)
 
 POINT_BUY_COSTS = {8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9}
 
@@ -172,38 +188,8 @@ def _item_cost_gp(el: Element) -> float:
 
 
 def _make_magic_sparkles_pixmap(color_hex: str, size: int = 14) -> QPixmap:
-    """Draw 3 crisp 4-pointed sparkle stars in the exact given hex color."""
-    pix = QPixmap(size, size)
-    pix.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pix)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(color_hex))
-
-    def draw_star(cx: float, cy: float, outer_r: float) -> None:
-        inner_r = 0.44 * outer_r
-        pts = [
-            QPointF(cx, cy - outer_r),
-            QPointF(cx + inner_r, cy - inner_r),
-            QPointF(cx + outer_r, cy),
-            QPointF(cx + inner_r, cy + inner_r),
-            QPointF(cx, cy + outer_r),
-            QPointF(cx - inner_r, cy + inner_r),
-            QPointF(cx - outer_r, cy),
-            QPointF(cx - inner_r, cy - inner_r),
-        ]
-        path = QPainterPath()
-        path.moveTo(pts[0])
-        for p in pts[1:]:
-            path.lineTo(p)
-        path.closeSubpath()
-        painter.drawPath(path)
-
-    draw_star(size * 0.38, size * 0.56, size * 0.38)
-    draw_star(size * 0.74, size * 0.28, size * 0.24)
-    draw_star(size * 0.76, size * 0.74, size * 0.17)
-    painter.end()
-    return pix
+    """Render crisp 4-pointed sparkle stars from the sparkles SVG asset."""
+    return svg_pixmap("sparkles", color_hex, size)
 
 
 @functools.lru_cache(maxsize=64)
@@ -309,28 +295,17 @@ def _equip_type_icon(el_type: str) -> QIcon:
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    if el_type == "Magic Item":
-        p.setBrush(QColor("#331829"))
-        p.setPen(QPen(QColor("#f472b6"), 1.6))
-        p.drawEllipse(1, 1, 26, 26)
-        sp = _make_magic_sparkles_pixmap("#f472b6", 16)
-        p.drawPixmap(6, 6, sp)
-        p.end()
-        return QIcon(pix)
     icon_map = {
-        "Weapon": ("⚔", "#e2e8f0", "#292524", "#a8a29e"),
-        "Armor": ("🛡", "#67e8f9", "#162c36", "#22d3ee"),
-        "Item": ("●", "#9ca3af", "#1f2937", "#6b7280"),
+        "Magic Item": ("sparkles", "#f472b6", "#331829", "#f472b6"),
+        "Weapon": ("sword", "#e2e8f0", "#292524", "#a8a29e"),
+        "Armor": ("shield", "#67e8f9", "#162c36", "#22d3ee"),
+        "Item": ("backpack", "#9ca3af", "#1f2937", "#6b7280"),
     }
-    glyph, fg, bg, border = icon_map.get(el_type, ("●", "#9ca3af", "#1f2937", "#6b7280"))
+    icon_name, fg, bg, border = icon_map.get(el_type, ("backpack", "#9ca3af", "#1f2937", "#6b7280"))
     p.setBrush(QColor(bg))
     p.setPen(QPen(QColor(border), 1.6))
     p.drawEllipse(1, 1, 26, 26)
-    p.setPen(QColor(fg))
-    f = QFont("Sans Serif", 11)
-    f.setBold(True)
-    p.setFont(f)
-    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
+    p.drawPixmap(6, 6, svg_pixmap(icon_name, fg, 16))
     p.end()
     return QIcon(pix)
 
@@ -501,71 +476,13 @@ class _CatalogSelectorTab(QWidget):
 
 
 def _make_kde_win_icon(kind: str, color_hex: str, size: int = 16) -> QIcon:
-    """Use system theme window control icon if available, else draw Windows 11 or KDE Breeze vector."""
-    if not is_windows():
-        theme_map = {
-            "minimize": ("window-minimize-symbolic", "window-minimize"),
-            "maximize": ("window-maximize-symbolic", "window-maximize"),
-            "restore": ("window-restore-symbolic", "window-restore"),
-            "close": ("window-close-symbolic", "window-close"),
-        }
-        for tname in theme_map.get(kind, ()):
-            ic = QIcon.fromTheme(tname)
-            if not ic.isNull():
-                return ic
-
-    pix = QPixmap(size, size)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing, not is_windows())
-    pen = QPen(QColor(color_hex), 1.4 if is_windows() else 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    m = size * 0.28
-    mid = size * 0.5
-    if is_windows():
-        if kind == "minimize":
-            p.drawLine(QPointF(m, mid + 1.0), QPointF(size - m, mid + 1.0))
-        elif kind == "maximize":
-            p.drawRect(int(m), int(m), int(size - 2 * m), int(size - 2 * m))
-        elif kind == "restore":
-            s = int(size - 2 * m - 2)
-            p.drawRect(int(m), int(m + 2), s, s)
-            p.drawLine(int(m + 2), int(m + 2), int(m + 2), int(m))
-            p.drawLine(int(m + 2), int(m), int(m + 2 + s), int(m))
-            p.drawLine(int(m + 2 + s), int(m), int(m + 2 + s), int(m + s))
-            p.drawLine(int(m + s), int(m + s), int(m + 2 + s), int(m + s))
-        else:
-            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            p.drawLine(QPointF(m, m), QPointF(size - m, size - m))
-            p.drawLine(QPointF(size - m, m), QPointF(m, size - m))
-        p.end()
-        return QIcon(pix)
-
-    if kind == "minimize":
-        # KDE Breeze downward chevron
-        p.drawLine(QPointF(m, mid - 1.5), QPointF(mid, mid + 2.5))
-        p.drawLine(QPointF(mid, mid + 2.5), QPointF(size - m, mid - 1.5))
-    elif kind == "maximize":
-        # KDE Breeze upward chevron
-        p.drawLine(QPointF(m, mid + 2.0), QPointF(mid, mid - 2.0))
-        p.drawLine(QPointF(mid, mid - 2.0), QPointF(size - m, mid + 2.0))
-    elif kind == "restore":
-        # KDE Breeze diamond
-        r = size * 0.24
-        p.drawLine(QPointF(mid, mid - r), QPointF(mid + r, mid))
-        p.drawLine(QPointF(mid + r, mid), QPointF(mid, mid + r))
-        p.drawLine(QPointF(mid, mid + r), QPointF(mid - r, mid))
-        p.drawLine(QPointF(mid - r, mid), QPointF(mid, mid - r))
-    else:
-        # KDE Breeze close X
-        p.drawLine(QPointF(m, m), QPointF(size - m, size - m))
-        p.drawLine(QPointF(size - m, m), QPointF(m, size - m))
-    p.end()
-    return QIcon(pix)
+    """Render consistent SVG window control icons across Linux and Windows."""
+    valid_kind = kind if kind in ("minimize", "maximize", "restore", "close") else "close"
+    return svg_icon(f"window-{valid_kind}", color_hex, size)
 
 
 class _WindowTitleBar(QFrame):
-    """Custom integrated window bar with KDE Breeze window controls, +/- UI scale stepper & theme toggle."""
+    """Custom integrated window bar with SVG window controls, 5-stage zoom selector & theme toggle."""
 
     def __init__(self, parent_win: QMainWindow, icon_path: Path) -> None:
         super().__init__(parent_win)
@@ -573,98 +490,124 @@ class _WindowTitleBar(QFrame):
         self._drag_pos = None
         self._theme = "dark"
         self.setObjectName("WindowTitleBar")
-        self.setFixedHeight(46)
+        self.setFixedHeight(34)
 
         hl = QHBoxLayout(self)
-        hl.setContentsMargins(14, 4, 10, 4)
-        hl.setSpacing(8)
+        hl.setContentsMargins(10, 0, 0, 0)
+        hl.setSpacing(6)
 
-        lbl_icon = QLabel()
-        lbl_icon.setFixedSize(26, 26)
-        if icon_path.is_file():
-            lbl_icon.setPixmap(QIcon(str(icon_path)).pixmap(26, 26))
-        hl.addWidget(lbl_icon)
-
-        self.lbl_title = QLabel("Aurora Borealis")
-        self.lbl_title.setObjectName("WindowTitleText")
-        hl.addWidget(self.lbl_title)
-
-        self.lbl_breadcrumb = QLabel("·  Character Library")
-        self.lbl_breadcrumb.setObjectName("WindowBreadcrumb")
-        hl.addWidget(self.lbl_breadcrumb)
+        self.lbl_logo = QLabel()
+        self.lbl_logo.setFixedSize(18, 18)
+        self.lbl_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_logo.setToolTip("Aurora Borealis")
+        self._refresh_logo_pixmap()
+        hl.addWidget(self.lbl_logo)
         hl.addStretch()
 
-        # Scale stepper: [-] [100%] [+]
-        self.btn_scale_minus = QPushButton("−")
+        # 5-stage Zoom selector: [-] [Normal (100%) v] [+]
+        self.btn_scale_minus = QPushButton("")
         self.btn_scale_minus.setObjectName("StepperBtn")
-        self.btn_scale_minus.setToolTip("Decrease UI Scale")
+        self.btn_scale_minus.setToolTip("Previous Zoom Stage")
         self.btn_scale_minus.setCursor(Qt.CursorShape.PointingHandCursor)
+        apply_button_icon(self.btn_scale_minus, "minus", theme="dark", size=13)
 
-        self.lbl_scale_val = QLabel("100%")
-        self.lbl_scale_val.setObjectName("ScaleValuePill")
-        self.lbl_scale_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cmb_scale_stage = QComboBox()
+        self.cmb_scale_stage.setObjectName("ScaleStageCombo")
+        self.cmb_scale_stage.setToolTip("Select UI Zoom Stage")
+        for val, name in UI_ZOOM_STAGES:
+            self.cmb_scale_stage.addItem(f"{name} ({round(val * 100)}%)", val)
+        configure_dropdown_combo(self.cmb_scale_stage, max_visible=len(UI_ZOOM_STAGES))
+        self.cmb_scale_stage.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.cmb_scale_stage.setFixedWidth(150)
 
-        self.btn_scale_plus = QPushButton("+")
+        self.btn_scale_plus = QPushButton("")
         self.btn_scale_plus.setObjectName("StepperBtn")
-        self.btn_scale_plus.setToolTip("Increase UI Scale")
+        self.btn_scale_plus.setToolTip("Next Zoom Stage")
         self.btn_scale_plus.setCursor(Qt.CursorShape.PointingHandCursor)
+        apply_button_icon(self.btn_scale_plus, "plus", theme="dark", size=13)
 
         hl.addWidget(self.btn_scale_minus)
-        hl.addWidget(self.lbl_scale_val)
+        hl.addWidget(self.cmb_scale_stage)
         hl.addWidget(self.btn_scale_plus)
 
-        self.btn_theme = QPushButton("☀")
+        self.btn_theme = QPushButton("")
         self.btn_theme.setObjectName("ThemeToggleBtn")
         self.btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_theme.setToolTip("Switch to Light Mode")
+        apply_button_icon(self.btn_theme, "sun", theme="dark", size=15)
         hl.addWidget(self.btn_theme)
 
-        # KDE Breeze window controls
+        # Flush window controls anchored all the way to the top-right corner
         self.btn_min = QPushButton()
         self.btn_min.setObjectName("KdeWinBtn")
         self.btn_min.setToolTip("Minimize")
-        self.btn_min.setIconSize(QSize(16, 16))
+        self.btn_min.setIconSize(QSize(14, 14))
+        self.btn_min.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.btn_min.setCursor(Qt.CursorShape.ArrowCursor)
         self.btn_min.clicked.connect(self._win.showMinimized)
 
         self.btn_max = QPushButton()
         self.btn_max.setObjectName("KdeWinBtn")
         self.btn_max.setToolTip("Maximize / Restore")
-        self.btn_max.setIconSize(QSize(16, 16))
+        self.btn_max.setIconSize(QSize(14, 14))
+        self.btn_max.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.btn_max.setCursor(Qt.CursorShape.ArrowCursor)
         self.btn_max.clicked.connect(self._toggle_maximize)
 
         self.btn_close = QPushButton()
         self.btn_close.setObjectName("KdeCloseBtn")
         self.btn_close.setToolTip("Close")
-        self.btn_close.setIconSize(QSize(16, 16))
+        self.btn_close.setIconSize(QSize(14, 14))
+        self.btn_close.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.btn_close.setCursor(Qt.CursorShape.ArrowCursor)
         self.btn_close.clicked.connect(self._win.close)
 
+        win_btns = QHBoxLayout()
+        win_btns.setContentsMargins(0, 0, 0, 0)
+        win_btns.setSpacing(0)
+        win_btns.addWidget(self.btn_min)
+        win_btns.addWidget(self.btn_max)
+        win_btns.addWidget(self.btn_close)
+
         hl.addSpacing(4)
-        hl.addWidget(self.btn_min)
-        hl.addWidget(self.btn_max)
-        hl.addWidget(self.btn_close)
+        hl.addLayout(win_btns)
         self._refresh_kde_icons()
+
+    def _refresh_logo_pixmap(self) -> None:
+        logo_color = "#6b7280" if self._theme == "light" else "#5b616b"
+        self.lbl_logo.setPixmap(svg_pixmap("aurora-logo-subtle", logo_color, 18))
 
     def _refresh_kde_icons(self) -> None:
         fg = "#1f1f1f" if self._theme == "light" else "#e2e5ea"
-        self.btn_min.setIcon(_make_kde_win_icon("minimize", fg))
-        self.btn_max.setIcon(_make_kde_win_icon("restore" if self._win.isMaximized() else "maximize", fg))
-        self.btn_close.setIcon(_make_kde_win_icon("close", fg))
+        self.btn_min.setIcon(_make_kde_win_icon("minimize", fg, 14))
+        self.btn_max.setIcon(_make_kde_win_icon("restore" if self._win.isMaximized() else "maximize", fg, 14))
+        self.btn_close.setIcon(_make_kde_win_icon("close", fg, 14))
 
     def set_theme_icon(self, theme: str) -> None:
         self._theme = "light" if theme == "light" else "dark"
         if self._theme == "light":
-            self.btn_theme.setText("☾")
+            apply_button_icon(self.btn_theme, "moon", theme="light", size=15)
             self.btn_theme.setToolTip("Switch to Dark Mode")
         else:
-            self.btn_theme.setText("☀")
+            apply_button_icon(self.btn_theme, "sun", theme="dark", size=15)
             self.btn_theme.setToolTip("Switch to Light Mode")
+        refresh_themed_icons(self, self._theme)
+        self._refresh_logo_pixmap()
         self._refresh_kde_icons()
 
     def set_scale_value(self, scale: float) -> None:
-        self.lbl_scale_val.setText(f"{round(scale * 100)}%")
+        idx = get_zoom_stage_index(scale)
+        s = UI_ZOOM_STAGES[idx][0]
+        self.setFixedHeight(max(30, round(34 * s)))
+        self.cmb_scale_stage.blockSignals(True)
+        self.cmb_scale_stage.setCurrentIndex(idx)
+        self.cmb_scale_stage.blockSignals(False)
+        self.cmb_scale_stage.setFixedWidth(max(134, round(150 * s)))
+        self.btn_scale_minus.setEnabled(idx > 0)
+        self.btn_scale_plus.setEnabled(idx < len(UI_ZOOM_STAGES) - 1)
 
     def set_breadcrumb(self, text: str) -> None:
-        self.lbl_breadcrumb.setText(f"·  {text}" if text else "")
+        self.lbl_logo.setToolTip(f"Aurora Borealis — {text}" if text else "Aurora Borealis")
 
     def _toggle_maximize(self) -> None:
         if self._win.isMaximized():
@@ -737,11 +680,7 @@ class MainWindow(QMainWindow):
         self._equip_catalog_sig: Optional[tuple] = None
         self._last_resize_edge: Qt.Edge = Qt.Edge(0)
         self._select_view_scale_dirty: bool = False
-        self._pending_scale_persist: bool = False
-        self._scale_timer = QTimer(self)
-        self._scale_timer.setSingleShot(True)
-        self._scale_timer.setInterval(90)
-        self._scale_timer.timeout.connect(self._apply_deferred_scale)
+        self._applied_scale: Optional[float] = None
 
         # Start new character with NOTHING pre-selected
         self.state = CharacterState()
@@ -772,6 +711,9 @@ class MainWindow(QMainWindow):
         self.config.theme = "light" if str(self.config.theme).lower() == "light" else "dark"
         if hasattr(self, "title_bar"):
             self.title_bar.set_theme_icon(self.config.theme)
+        refresh_themed_icons(self, self.config.theme)
+        if hasattr(self, "select_view") and hasattr(self.select_view, "set_theme"):
+            self.select_view.set_theme(self.config.theme)
         self.apply_scale(self.config.ui_scale, persist=False)
 
         self.refresh_library()
@@ -814,8 +756,9 @@ class MainWindow(QMainWindow):
 
         self.title_bar = _WindowTitleBar(self, self._icon_path)
         self.title_bar.btn_theme.clicked.connect(self.toggle_theme)
-        self.title_bar.btn_scale_minus.clicked.connect(lambda: self._step_scale(-0.10))
-        self.title_bar.btn_scale_plus.clicked.connect(lambda: self._step_scale(0.10))
+        self.title_bar.btn_scale_minus.clicked.connect(lambda: self._step_scale_stage(-1))
+        self.title_bar.btn_scale_plus.clicked.connect(lambda: self._step_scale_stage(1))
+        self.title_bar.cmb_scale_stage.currentIndexChanged.connect(self._on_scale_stage_selected)
         shell_layout.addWidget(self.title_bar)
 
         self.screen_stack = QStackedWidget()
@@ -869,6 +812,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(get_stylesheet(normalized, self.config.ui_scale))
         if hasattr(self, "title_bar"):
             self.title_bar.set_theme_icon(normalized)
+        refresh_themed_icons(self, normalized)
+        if hasattr(self, "select_view") and hasattr(self.select_view, "set_theme"):
+            self.select_view.set_theme(normalized)
         if persist:
             save_config(self.config, self.config_path)
 
@@ -876,18 +822,15 @@ class MainWindow(QMainWindow):
         next_theme = "light" if self.config.theme == "dark" else "dark"
         self.apply_theme(next_theme, persist=True)
 
-    def _step_scale(self, delta: float) -> None:
-        new_scale = round(max(0.85, min(1.5, self.config.ui_scale + delta)), 2)
-        self.config.ui_scale = new_scale
-        if hasattr(self, "title_bar"):
-            self.title_bar.set_scale_value(new_scale)
-        self._pending_scale_persist = True
-        self._scale_timer.start()
+    def _step_scale_stage(self, step: int) -> None:
+        cur_idx = get_zoom_stage_index(self.config.ui_scale)
+        nxt_idx = max(0, min(len(UI_ZOOM_STAGES) - 1, cur_idx + step))
+        self.apply_scale(UI_ZOOM_STAGES[nxt_idx][0], persist=True)
 
-    def _apply_deferred_scale(self) -> None:
-        persist = self._pending_scale_persist
-        self._pending_scale_persist = False
-        self.apply_scale(self.config.ui_scale, persist=persist)
+    def _on_scale_stage_selected(self, idx: int) -> None:
+        val = self.title_bar.cmb_scale_stage.itemData(idx)
+        if val is not None:
+            self.apply_scale(float(val), persist=True)
 
     def _edge_at(self, pos) -> Qt.Edge:
         margin = 6
@@ -933,14 +876,20 @@ class MainWindow(QMainWindow):
         super().mouseMoveEvent(event)
 
     def apply_scale(self, scale: float, persist: bool = True) -> None:
-        clamped = round(max(0.85, min(1.5, float(scale))), 2)
+        clamped = snap_ui_scale(scale)
         self.config.ui_scale = clamped
+        if self._applied_scale is not None and abs(clamped - self._applied_scale) < 1e-6:
+            if hasattr(self, "title_bar"):
+                self.title_bar.set_scale_value(clamped)
+            if persist:
+                save_config(self.config, self.config_path)
+            return
+        self._applied_scale = clamped
         self.setUpdatesEnabled(False)
         try:
             self.setStyleSheet(get_stylesheet(self.config.theme, clamped))
             if hasattr(self, "title_bar"):
                 self.title_bar.set_scale_value(clamped)
-                self.title_bar.setFixedHeight(max(40, round(46 * clamped)))
             self._rescale_fixed_widgets(clamped)
             if hasattr(self, "select_view") and hasattr(self.select_view, "set_ui_scale"):
                 if self.screen_stack.currentWidget() is self.select_view:
@@ -1017,7 +966,7 @@ class MainWindow(QMainWindow):
                 self._sync_hp_panel()
         if hasattr(self, "tab_bar_scroll"):
             self.tab_bar_scroll.setFixedHeight(max(44, round(46 * s)))
-        ensure_widgets_fit(self)
+        refit_buttons(self)
 
     def show_character_select(self) -> None:
         if not self.confirm_leave_character():
@@ -1088,7 +1037,8 @@ class MainWindow(QMainWindow):
         tb_layout = QHBoxLayout(top_bar)
         tb_layout.setContentsMargins(14, 8, 14, 8)
 
-        btn_back = QPushButton("← Characters")
+        btn_back = QPushButton("Characters")
+        apply_button_icon(btn_back, "arrow-left", size=15)
         btn_back.clicked.connect(self.show_character_select)
         self.lbl_top_name = QLabel("New Adventurer")
         self.lbl_top_name.setObjectName("TitleText")
@@ -1103,9 +1053,11 @@ class MainWindow(QMainWindow):
         tb_layout.addWidget(self.lbl_top_ruleset)
         tb_layout.addStretch()
 
-        self.btn_rule_overrides = QPushButton("⚙ Rule Overrides…")
+        self.btn_rule_overrides = QPushButton("Rule Overrides")
+        apply_button_icon(self.btn_rule_overrides, "settings", size=15)
         self.btn_rule_overrides.clicked.connect(self.open_rule_overrides_dialog)
-        self.btn_level_up = QPushButton("⬆ Level Up…")
+        self.btn_level_up = QPushButton("Level Up")
+        apply_button_icon(self.btn_level_up, "arrow-up-circle", size=15)
         self.btn_level_up.clicked.connect(self.open_level_up_wizard)
         btn_save = QPushButton("Save")
         btn_save.setObjectName("PrimaryBtn")
@@ -1162,7 +1114,8 @@ class MainWindow(QMainWindow):
         btn_lvl_p = QPushButton("+")
         btn_lvl_p.setObjectName("StepperBtn")
         btn_lvl_p.clicked.connect(lambda: self.spn_level.setValue(min(20, self.spn_level.value() + 1)))
-        self.btn_class_level_up = QPushButton("⬆ Level Up Wizard…")
+        self.btn_class_level_up = QPushButton("Level Up Wizard")
+        apply_button_icon(self.btn_class_level_up, "arrow-up-circle", size=15)
         self.btn_class_level_up.clicked.connect(self.open_level_up_wizard)
         clw.addWidget(btn_lvl_m)
         clw.addWidget(self.spn_level)
@@ -1172,7 +1125,7 @@ class MainWindow(QMainWindow):
         clw.addStretch()
         cls_top_v.addLayout(clw)
 
-        self.multiclass_group = QGroupBox("Classes & Multiclassing")
+        self.multiclass_group = QGroupBox("Classes && Multiclassing")
         mc_v = QVBoxLayout(self.multiclass_group)
         mc_v.setContentsMargins(8, 8, 8, 8)
         mc_v.setSpacing(6)
@@ -1252,11 +1205,11 @@ class MainWindow(QMainWindow):
             ("Class", self.tab_class),
             ("Background", self.tab_background),
             ("Abilities", self._build_tab_abilities()),
-            ("Choices & Feats", self._build_tab_choices_feats()),
-            ("Skills & Features", self._build_tab_skills_features()),
+            ("Choices && Feats", self._build_tab_choices_feats()),
+            ("Skills && Features", self._build_tab_skills_features()),
             ("Equipment", self._build_tab_equipment()),
             ("Spells", self._build_tab_spells()),
-            ("Details & Notes", self._build_tab_notes()),
+            ("Details && Notes", self._build_tab_notes()),
         ]
         for idx, (label, page) in enumerate(tab_specs):
             self.builder_tabs_stack.addWidget(page)
@@ -1403,7 +1356,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
 
-        top_box = QGroupBox("Character Summary & Ruleset")
+        top_box = QGroupBox("Character Summary && Ruleset")
         form = QFormLayout(top_box)
         self.txt_overview_name = QLineEdit()
         self.txt_overview_name.textChanged.connect(self._on_overview_name_changed)
@@ -1427,7 +1380,8 @@ class MainWindow(QMainWindow):
         lvl_row.addWidget(self.lbl_overview_level)
         lvl_row.addWidget(btn_lp)
         lvl_row.addSpacing(12)
-        self.btn_overview_level_up = QPushButton("⬆ Level Up Wizard…")
+        self.btn_overview_level_up = QPushButton("Level Up Wizard")
+        apply_button_icon(self.btn_overview_level_up, "arrow-up-circle", size=15)
         self.btn_overview_level_up.clicked.connect(self.open_level_up_wizard)
         lvl_row.addWidget(self.btn_overview_level_up)
         lvl_row.addSpacing(12)
@@ -1455,7 +1409,8 @@ class MainWindow(QMainWindow):
         self.cmb_hp_mode.addItem("Average (Fixed)", "average")
         self.cmb_hp_mode.addItem("Rolled / Manual", "rolled")
         self.cmb_hp_mode.currentIndexChanged.connect(self._on_hp_mode_changed)
-        self.btn_roll_all_hp = QPushButton("🎲 Roll All HP")
+        self.btn_roll_all_hp = QPushButton("Roll All HP")
+        apply_button_icon(self.btn_roll_all_hp, "dice", size=15)
         self.btn_roll_all_hp.clicked.connect(self._roll_all_hp)
         self.btn_reset_avg_hp = QPushButton("Reset to Average")
         self.btn_reset_avg_hp.clicked.connect(self._reset_average_hp)
@@ -1492,7 +1447,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.hp_group)
 
         # 5.5e Rules & Combat Status (Heroic Inspiration, Exhaustion, Divine/Primal Order)
-        self.rules_55e_group = QGroupBox("5.5e (2024) Mechanics & Orders")
+        self.rules_55e_group = QGroupBox("5.5e (2024) Mechanics && Orders")
         r55_v = QVBoxLayout(self.rules_55e_group)
         r55_row = QHBoxLayout()
         self.chk_heroic_inspiration = QCheckBox("Heroic Inspiration")
@@ -1543,9 +1498,9 @@ class MainWindow(QMainWindow):
         self.btn_card_race = self._make_overview_card("1. Race / Species", "Not selected — click to choose", 1)
         self.btn_card_class = self._make_overview_card("2. Class", "Not selected — click to choose", 2)
         self.btn_card_bg = self._make_overview_card("3. Background", "Not selected — click to choose", 3)
-        self.btn_card_choices = self._make_overview_card("4. Choices & Feats", "0 pending choices", 5)
+        self.btn_card_choices = self._make_overview_card("4. Choices && Feats", "0 pending choices", 5)
         self.btn_card_abilities = self._make_overview_card("5. Ability Scores", "Click to adjust scores", 4)
-        self.btn_card_spells = self._make_overview_card("6. Equipment & Spells", "Click to manage gear", 7)
+        self.btn_card_spells = self._make_overview_card("6. Equipment && Spells", "Click to manage gear", 7)
 
         cards_grid.addWidget(self.btn_card_race, 0, 0)
         cards_grid.addWidget(self.btn_card_class, 0, 1)
@@ -1679,7 +1634,7 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.selections_container)
         sel_outer.addWidget(scroll)
 
-        right = QGroupBox("Feat Browser & Description Inspector")
+        right = QGroupBox("Feat Browser && Description Inspector")
         rl = QVBoxLayout(right)
         self.txt_feat_search = QLineEdit()
         self.txt_feat_search.setPlaceholderText("Search feats…")
@@ -1824,7 +1779,7 @@ class MainWindow(QMainWindow):
         feat_layout.addWidget(self.lst_features, 1)
         self.feat_desc_browser = QTextBrowser()
         feat_layout.addWidget(self.feat_desc_browser, 1)
-        self.tab6_right_tabs.addTab(feat_group, "Features, Proficiencies & Languages")
+        self.tab6_right_tabs.addTab(feat_group, "Features, Proficiencies && Languages")
 
         # Sub-tab: Animal Forms / Wild Shape
         forms_w = QWidget()
@@ -1879,9 +1834,9 @@ class MainWindow(QMainWindow):
         fw_l.addLayout(af_btns)
 
         af_custom_btns = QHBoxLayout()
-        self.btn_custom_animal_form = QPushButton("+ Custom Form…")
+        self.btn_custom_animal_form = QPushButton("+ Custom Form")
         self.btn_custom_animal_form.clicked.connect(self._create_custom_animal_form)
-        self.btn_edit_custom_animal_form = QPushButton("Edit Custom…")
+        self.btn_edit_custom_animal_form = QPushButton("Edit Custom")
         self.btn_edit_custom_animal_form.clicked.connect(self._edit_selected_custom_animal_form)
         af_custom_btns.addWidget(self.btn_custom_animal_form)
         af_custom_btns.addWidget(self.btn_edit_custom_animal_form)
@@ -1909,7 +1864,7 @@ class MainWindow(QMainWindow):
         self.btn_add_companion = QPushButton("+ Add Companion")
         self.btn_add_companion.setObjectName("PrimaryBtn")
         self.btn_add_companion.clicked.connect(self._add_companion_from_template)
-        self.btn_import_companion = QPushButton("Import .dndcomp…")
+        self.btn_import_companion = QPushButton("Import .dndcomp")
         self.btn_import_companion.clicked.connect(self._import_companion_to_character)
         cmp_top.addWidget(self.cmb_companion_tpl, 1)
         cmp_top.addWidget(self.btn_add_companion)
@@ -1928,7 +1883,7 @@ class MainWindow(QMainWindow):
         self.btn_open_companion = QPushButton("Open Companion Sheet")
         self.btn_open_companion.setObjectName("PrimaryBtn")
         self.btn_open_companion.clicked.connect(self._open_selected_attached_companion)
-        self.btn_save_comp_file = QPushButton("Save as .dndcomp…")
+        self.btn_save_comp_file = QPushButton("Save as .dndcomp")
         self.btn_save_comp_file.clicked.connect(self._save_selected_companion_standalone)
         self.btn_export_comp_pdf = QPushButton("Export Companion PDF")
         self.btn_export_comp_pdf.clicked.connect(self._export_selected_companion_pdf)
@@ -1967,7 +1922,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        cur_group = QGroupBox("Currency & Encumbrance")
+        cur_group = QGroupBox("Currency && Encumbrance")
         cur_layout = QHBoxLayout(cur_group)
         self.cur_spins: dict[str, QSpinBox] = {}
         for coin in ("cp", "sp", "ep", "gp", "pp"):
@@ -2057,7 +2012,8 @@ class MainWindow(QMainWindow):
         btn_add_eq = QPushButton("Add to Inventory")
         btn_add_eq.setObjectName("PrimaryBtn")
         btn_add_eq.clicked.connect(self._add_selected_equipment)
-        self.btn_magic_gear = QPushButton("✦ Magic / Infused Armor & Weapons…")
+        self.btn_magic_gear = QPushButton("Magic / Infused Armor && Weapons")
+        apply_button_icon(self.btn_magic_gear, "sparkles", size=15)
         self.btn_magic_gear.clicked.connect(self._open_magic_gear_dialog)
         eq_btn_row.addWidget(btn_add_eq)
         eq_btn_row.addWidget(self.btn_magic_gear)
@@ -2241,7 +2197,7 @@ class MainWindow(QMainWindow):
 
         right_box = QWidget()
         right_layout = QVBoxLayout(right_box)
-        known_box = QGroupBox("Known & Prepared Spells")
+        known_box = QGroupBox("Known && Prepared Spells")
         known_layout = QVBoxLayout(known_box)
         self.tbl_spells = QTableWidget(0, 6)
         self.tbl_spells.setHorizontalHeaderLabels(["Spell", "Level", "School", "R / C", "Source", "Prepared"])
@@ -2283,7 +2239,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        details_box = QGroupBox("Character Details, Alignment, Deity & Portrait")
+        details_box = QGroupBox("Character Details, Alignment, Deity && Portrait")
         outer_details = QHBoxLayout(details_box)
 
         port_col = QVBoxLayout()
@@ -2291,7 +2247,7 @@ class MainWindow(QMainWindow):
         self.lbl_notes_portrait.setObjectName("PortraitFrame")
         self.lbl_notes_portrait.setFixedSize(110, 110)
         self.lbl_notes_portrait.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        btn_choose_p = QPushButton("Choose Portrait…")
+        btn_choose_p = QPushButton("Choose Portrait")
         btn_choose_p.clicked.connect(self._pick_character_portrait)
         btn_clear_p = QPushButton("Clear Portrait")
         btn_clear_p.clicked.connect(self._clear_character_portrait)
@@ -2479,7 +2435,7 @@ class MainWindow(QMainWindow):
         if self.state.allow_extra_spells and not self.state.rule_overrides.get("allow_extra_spells"):
             active_ov += 1
         self.btn_rule_overrides.setText(
-            f"⚙ Rule Overrides ({active_ov})…" if active_ov else "⚙ Rule Overrides…"
+            f"Rule Overrides ({active_ov})" if active_ov else "Rule Overrides"
         )
         fit_button(self.btn_rule_overrides)
 
@@ -2547,22 +2503,36 @@ class MainWindow(QMainWindow):
 
         self.btn_card_race.setText(
             f"1. {'Species' if is_55e else 'Race'}\n\n"
-            + (f"✓ {race_el.name}" if race_el else "Not selected — click to choose")
+            + (race_el.name if race_el else "Not selected — click to choose")
         )
+        if race_el:
+            apply_button_icon(self.btn_card_race, "check", theme=self.config.theme, size=18, fixed_color="#34d399")
+        else:
+            self.btn_card_race.setIcon(QIcon())
+
         self.btn_card_class.setText(
             "2. Class\n\n"
-            + (f"✓ {cls_summary}" if cls_summary else "Not selected — click to choose")
+            + (cls_summary if cls_summary else "Not selected — click to choose")
         )
+        if cls_summary:
+            apply_button_icon(self.btn_card_class, "check", theme=self.config.theme, size=18, fixed_color="#34d399")
+        else:
+            self.btn_card_class.setIcon(QIcon())
+
         self.btn_card_bg.setText(
             "3. Background\n\n"
-            + (f"✓ {bg_el.name}" if bg_el else "Not selected — click to choose")
+            + (bg_el.name if bg_el else "Not selected — click to choose")
         )
+        if bg_el:
+            apply_button_icon(self.btn_card_bg, "check", theme=self.config.theme, size=18, fixed_color="#34d399")
+        else:
+            self.btn_card_bg.setIcon(QIcon())
         self.btn_card_abilities.setText(
             "5. Ability Scores\n\n"
             + " | ".join(f"{ABILITY_ABBR[a]} {self.computed.ability_totals[a]}" for a in ABILITIES)
         )
         self.btn_card_spells.setText(
-            "6. Equipment & Spells\n\n"
+            "6. Equipment && Spells\n\n"
             f"{len(self.state.inventory)} items • {len(self.state.known_spells)} spells"
         )
 
@@ -2586,6 +2556,10 @@ class MainWindow(QMainWindow):
             tuple((k, v) for k, v in sorted(self.state.rule_overrides.items()) if v),
             tuple(
                 (s.key, s.source_element_id, s.rule.type, s.rule.number, s.rule.level, tuple(s.options))
+                for s in self.computed.active_selections
+            ),
+            tuple(
+                effective_selection_slot_count(s, self.state, self.computed)
                 for s in self.computed.active_selections
             ),
             tuple(sorted(e.id for e in self.computed.granted_elements if e.type not in ("Level", "Grants", "Support"))),
@@ -2619,20 +2593,20 @@ class MainWindow(QMainWindow):
         pending_total = 0
         active_class_ids = {c.class_id for c in self.state.normalized_classes()}
         for active_sel in self.computed.active_selections:
-            chosen = self.state.selections.get(active_sel.key, [])
-            filled = sum(1 for i in range(active_sel.rule.number) if i < len(chosen) and chosen[i])
-            if not active_sel.rule.optional and filled < active_sel.rule.number:
-                pending_total += active_sel.rule.number - filled
-            self._add_selection_widget(active_sel, filled, self.selections_layout)
+            eff_num = effective_selection_slot_count(active_sel, self.state, self.computed)
+            filled = selection_filled_count(active_sel, self.state, eff_num)
+            if not active_sel.rule.optional and filled < eff_num:
+                pending_total += eff_num - filled
+            self._add_selection_widget(active_sel, filled, eff_num, self.selections_layout)
 
             # Mirror scoped choices into Race / Class / Background tabs
             src_el = self.repo.get(active_sel.source_element_id)
             if active_sel.source_element_id == self.state.race_id or (src_el and src_el.type in ("Race", "Sub Race", "Racial Trait")):
-                self._add_selection_widget(active_sel, filled, self.tab_race.choices_layout)
+                self._add_selection_widget(active_sel, filled, eff_num, self.tab_race.choices_layout)
             elif active_sel.source_element_id in active_class_ids or (src_el and src_el.type in ("Class", "Archetype", "Class Feature", "Archetype Feature")):
-                self._add_selection_widget(active_sel, filled, self.tab_class.choices_layout)
+                self._add_selection_widget(active_sel, filled, eff_num, self.tab_class.choices_layout)
             elif active_sel.source_element_id == self.state.background_id or (src_el and src_el.type in ("Background", "Background Feature")):
-                self._add_selection_widget(active_sel, filled, self.tab_background.choices_layout)
+                self._add_selection_widget(active_sel, filled, eff_num, self.tab_background.choices_layout)
 
         for c in containers:
             ensure_widgets_fit(c)
@@ -2648,18 +2622,21 @@ class MainWindow(QMainWindow):
 
         if pending_total > 0:
             self.lbl_choices_pending.setText(f"{pending_total} choice(s) remaining")
-            self.btn_card_choices.setText(f"4. Choices & Feats\n\n• {pending_total} choice(s) pending — click to resolve")
+            self.btn_card_choices.setText(f"4. Choices && Feats\n\n{pending_total} choice(s) pending — click to resolve")
+            apply_button_icon(self.btn_card_choices, "warning", theme=self.config.theme, size=18, fixed_color="#f59e0b")
         else:
-            self.lbl_choices_pending.setText("All required choices selected ✓")
-            self.btn_card_choices.setText("4. Choices & Feats\n\n✓ All required choices resolved")
+            self.lbl_choices_pending.setText("All required choices selected")
+            self.btn_card_choices.setText("4. Choices && Feats\n\nAll required choices resolved")
+            apply_button_icon(self.btn_card_choices, "check", theme=self.config.theme, size=18, fixed_color="#34d399")
 
     def _add_selection_widget(
         self,
         active_sel: ActiveSelection,
         filled: int,
+        eff_num: int,
         target_layout: QVBoxLayout,
     ) -> None:
-        is_complete = filled >= active_sel.rule.number or active_sel.rule.optional
+        is_complete = filled >= eff_num or active_sel.rule.optional
         card = QFrame()
         card.setObjectName("ChoiceCard" if is_complete else "ChoiceCardPending")
         vbox = QVBoxLayout(card)
@@ -2671,11 +2648,11 @@ class MainWindow(QMainWindow):
             f"<b>{active_sel.rule.name}</b> <span style='color:#94a3b8;'>({active_sel.source_element_name})</span>"
         )
         lbl_title.setWordWrap(True)
-        status_color = "#4ade80" if filled >= active_sel.rule.number else "#facc15"
+        status_color = "#4ade80" if filled >= eff_num else "#facc15"
         status_text = (
-            f"✓ {filled}/{active_sel.rule.number}"
-            if filled >= active_sel.rule.number
-            else f"• {filled}/{active_sel.rule.number}"
+            f"✓ {filled}/{eff_num}"
+            if filled >= eff_num
+            else f"• {filled}/{eff_num}"
         )
         lbl_status = QLabel(status_text)
         lbl_status.setStyleSheet(f"color:{status_color}; font-weight:bold;")
@@ -2683,7 +2660,22 @@ class MainWindow(QMainWindow):
         hdr.addWidget(lbl_status)
         vbox.addLayout(hdr)
 
-        chosen = self.state.selections.get(active_sel.key, [])
+        if eff_num == 0:
+            lbl_empty = QLabel("All available options are already granted.")
+            lbl_empty.setObjectName("MutedText")
+            vbox.addWidget(lbl_empty)
+            target_layout.addWidget(card)
+            return
+
+        chosen = list(self.state.selections.get(active_sel.key, []))
+        slot_vals = list(chosen[:eff_num])
+        if any(chosen[eff_num:]):
+            compacted = [v for v in chosen if v]
+            slot_vals = (compacted + [""] * eff_num)[:eff_num]
+        else:
+            while len(slot_vals) < eff_num:
+                slot_vals.append("")
+
         all_granted_ids = {el.id for el in self.computed.granted_elements}
         other_sel_ids: set[str] = set()
         for skey, svals in self.state.selections.items():
@@ -2692,15 +2684,15 @@ class MainWindow(QMainWindow):
                     if sv:
                         other_sel_ids.add(sv)
 
-        for slot_idx in range(active_sel.rule.number):
+        for slot_idx in range(eff_num):
             cmb = QComboBox()
             configure_dropdown_combo(cmb, max_visible=14)
             cmb.addItem("— Choose —", "")
-            current_val = chosen[slot_idx] if slot_idx < len(chosen) else ""
+            current_val = slot_vals[slot_idx]
             same_sel_other = {
-                chosen[i]
-                for i in range(active_sel.rule.number)
-                if i != slot_idx and i < len(chosen) and chosen[i]
+                slot_vals[i]
+                for i in range(eff_num)
+                if i != slot_idx and slot_vals[i]
             }
             taken_ids = set(same_sel_other)
             if active_sel.rule.type != "List":
@@ -2719,12 +2711,15 @@ class MainWindow(QMainWindow):
                 if idx >= 0:
                     cmb.setCurrentIndex(idx)
 
-            def make_handler(skey: str, sidx: int, count: int, combo_ref: QComboBox):
+            def make_handler(skey: str, sidx: int, count: int, combo_ref: QComboBox, seed_vals: list[str]):
                 def _on_changed(_idx: int) -> None:
                     if self._updating:
                         return
                     val = combo_ref.currentData() or ""
-                    lst = list(self.state.selections.get(skey, [""] * count))
+                    lst = list(seed_vals)
+                    raw_lst = self.state.selections.get(skey, [])
+                    if len(raw_lst) >= count and not any(raw_lst[count:]):
+                        lst = list(raw_lst[:count])
                     while len(lst) < count:
                         lst.append("")
                     if val and not is_synthetic_asi_id(val) and any(i != sidx and v == val for i, v in enumerate(lst)):
@@ -2741,7 +2736,7 @@ class MainWindow(QMainWindow):
                 return _on_changed
 
             cmb.currentIndexChanged.connect(
-                make_handler(active_sel.key, slot_idx, active_sel.rule.number, cmb)
+                make_handler(active_sel.key, slot_idx, eff_num, cmb, slot_vals)
             )
             vbox.addWidget(cmb)
 
@@ -3799,31 +3794,20 @@ class MainWindow(QMainWindow):
         hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Type icon colors intentionally avoid Rarity colors (Green/Blue/Purple/Gold/Red)
-        if el_type == "Magic Item":
-            badge = QLabel()
-            badge.setFixedSize(26, 26)
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setToolTip(el_type)
-            badge.setPixmap(_make_magic_sparkles_pixmap("#f472b6", 17))
-            badge.setStyleSheet(
-                "background-color:#331829; border:1.5px solid #f472b6; border-radius:13px;"
-            )
-            hl.addWidget(badge)
-            return wrap
-
         icon_map = {
-            "Weapon": ("⚔", "#e2e8f0", "#292524", "#a8a29e"),
-            "Armor": ("🛡", "#67e8f9", "#162c36", "#22d3ee"),
-            "Item": ("●", "#9ca3af", "#1f2937", "#6b7280"),
+            "Magic Item": ("sparkles", "#f472b6", "#331829", "#f472b6"),
+            "Weapon": ("sword", "#e2e8f0", "#292524", "#a8a29e"),
+            "Armor": ("shield", "#67e8f9", "#162c36", "#22d3ee"),
+            "Item": ("backpack", "#9ca3af", "#1f2937", "#6b7280"),
         }
-        glyph, fg, bg, border = icon_map.get(el_type, ("●", "#9ca3af", "#1f2937", "#6b7280"))
-        badge = QLabel(glyph)
+        icon_name, fg, bg, border = icon_map.get(el_type, ("backpack", "#9ca3af", "#1f2937", "#6b7280"))
+        badge = QLabel()
         badge.setFixedSize(26, 26)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setToolTip(el_type)
+        badge.setPixmap(svg_pixmap(icon_name, fg, 16))
         badge.setStyleSheet(
-            f"background-color:{bg}; color:{fg}; border:1.5px solid {border}; "
-            "border-radius:13px; font-size:10.5pt; font-weight:bold;"
+            f"background-color:{bg}; border:1.5px solid {border}; border-radius:13px;"
         )
         hl.addWidget(badge)
         return wrap
@@ -4432,7 +4416,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Built-In Form",
-                "Only custom animal forms can be edited directly. Click '+ Custom Form…' to create a new custom variant.",
+                "Only custom animal forms can be edited directly. Click '+ Custom Form' to create a new custom variant.",
             )
             return
         cur_form = find_animal_form(fid, self.state)
@@ -4572,7 +4556,7 @@ class MainWindow(QMainWindow):
 
     def _import_companion_to_character(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Attach Companion (.dndcomp)", str(self._characters_dir()), "Companion Files (*.dndcomp);;All Files (*)"
+            self, "Attach Companion (.dndcomp)", str(get_os_downloads_dir()), "Companion Files (*.dndcomp);;All Files (*)"
         )
         if not path:
             return
@@ -4605,7 +4589,7 @@ class MainWindow(QMainWindow):
             return
         comp = CompanionState.from_dict(self.state.companions[row])
         safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", comp.name or "companion").strip(" .") or "companion"
-        default_path = str(self._characters_dir() / f"{safe_stem}.dndcomp")
+        default_path = str(get_os_downloads_dir() / f"{safe_stem}.dndcomp")
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Companion (.dndcomp)", default_path, "Aurora Companion (*.dndcomp)"
         )
@@ -4625,7 +4609,8 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.state.companions):
             return
         comp = CompanionState.from_dict(self.state.companions[row])
-        default_path = f"{comp.name or 'companion'}.pdf"
+        safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", comp.name or "companion").strip(" .") or "companion"
+        default_path = str(get_os_downloads_dir() / f"{safe_stem}.pdf")
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Companion Sheet PDF", default_path, "PDF Files (*.pdf)"
         )
@@ -4672,7 +4657,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Character Portrait",
-            "",
+            str(get_os_downloads_dir()),
             "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
         )
         if not path:
@@ -4767,8 +4752,12 @@ class MainWindow(QMainWindow):
             comp = self.engine.evaluate(st)
             if not self._confirm_missing_fields_before_pdf(st, comp):
                 return
+            safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", st.name or "character").strip(" .") or "character"
             out_path, _ = QFileDialog.getSaveFileName(
-                self, "Export Character Sheet PDF", f"{st.name or 'character'}.pdf", "PDF Files (*.pdf)"
+                self,
+                "Export Character Sheet PDF",
+                str(get_os_downloads_dir() / f"{safe_stem}.pdf"),
+                "PDF Files (*.pdf)",
             )
             if out_path:
                 if not out_path.lower().endswith(".pdf"):
@@ -4807,7 +4796,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import Aurora File (.dnd5e / .dnd55e / .dndcomp)",
-            "",
+            str(get_os_downloads_dir()),
             "Aurora Files (*.dnd5e *.dnd55e *.dndcomp);;All Files (*)",
         )
         if not path:
@@ -4924,7 +4913,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Export Failed", str(exc))
             return
-        default_name = f"{comp.name or 'companion'}.pdf"
+        safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", comp.name or "companion").strip(" .") or "companion"
+        default_name = str(get_os_downloads_dir() / f"{safe_stem}.pdf")
         out_path, _ = QFileDialog.getSaveFileName(
             self, "Export Companion Sheet PDF", default_name, "PDF Files (*.pdf)"
         )
@@ -4941,7 +4931,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Aurora File",
-            str(self._characters_dir()),
+            str(get_os_downloads_dir()),
             "Aurora Files (*.dnd5e *.dnd55e *.dndcomp);;All Files (*)",
         )
         if path:
@@ -5002,7 +4992,7 @@ class MainWindow(QMainWindow):
 
     def save_character_as(self) -> None:
         ext = default_character_extension(self.state.ruleset)
-        default_path = str(self._characters_dir() / _safe_filename(self.state.name, self.state.ruleset))
+        default_path = str(get_os_downloads_dir() / _safe_filename(self.state.name, self.state.ruleset))
         filt = (
             "Aurora 5.5e Character (*.dnd55e);;Aurora 5e Character (*.dnd5e)"
             if ext == ".dnd55e"
@@ -5027,7 +5017,8 @@ class MainWindow(QMainWindow):
     def export_pdf_dialog(self) -> None:
         if not self._confirm_missing_fields_before_pdf(self.state, self.computed):
             return
-        default_name = f"{self.state.name or 'character'}.pdf"
+        safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", self.state.name or "character").strip(" .") or "character"
+        default_name = str(get_os_downloads_dir() / f"{safe_stem}.pdf")
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Character Sheet PDF", default_name, "PDF Files (*.pdf)"
         )
@@ -5102,7 +5093,9 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def import_custom_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Custom Aurora XML Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Custom Aurora XML Folder", str(get_os_downloads_dir())
+        )
         if folder:
             if folder not in self.config.custom_dirs:
                 self.config.custom_dirs.append(folder)
@@ -5114,7 +5107,7 @@ class MainWindow(QMainWindow):
         msi = self.msi_path
         if msi is None or not msi.is_file():
             chosen, _ = QFileDialog.getOpenFileName(
-                self, "Select Aurora Setup.msi", "", "Windows Installer (*.msi)"
+                self, "Select Aurora Setup.msi", str(get_os_downloads_dir()), "Windows Installer (*.msi)"
             )
             if not chosen:
                 return

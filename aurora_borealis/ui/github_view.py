@@ -31,6 +31,8 @@ from ..github_importer import (
     remove_index,
     update_index,
 )
+from ..paths import get_os_downloads_dir
+from .icons import apply_button_icon
 
 
 class GitHubWorker(QThread):
@@ -129,7 +131,8 @@ class GitHubContentView(QWidget):
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(18, 12, 18, 12)
 
-        btn_back = QPushButton("← Back")
+        btn_back = QPushButton("Back")
+        apply_button_icon(btn_back, "arrow-left", size=15)
         btn_back.clicked.connect(self.back_requested.emit)
         title_col = QVBoxLayout()
         lbl_t = QLabel("Additional Content — GitHub & 5e.tools Manager")
@@ -144,14 +147,15 @@ class GitHubContentView(QWidget):
         self.btn_dups = QPushButton("Duplicates (0)")
         self.btn_dups.clicked.connect(self.show_duplicates_requested.emit)
 
-        btn_local = QPushButton("Import Local XML Folder…")
+        btn_local = QPushButton("Import Local XML Folder")
         btn_local.clicked.connect(self.import_local_folder_requested.emit)
 
         self.btn_official = QPushButton("Sync Official Aurora Legacy")
         self.btn_official.clicked.connect(self.start_official_sync)
 
-        self.btn_update_all = QPushButton("↻ Check All for Updates")
+        self.btn_update_all = QPushButton("Check All for Updates")
         self.btn_update_all.setObjectName("PrimaryBtn")
+        apply_button_icon(self.btn_update_all, "refresh", size=15)
         self.btn_update_all.clicked.connect(self.start_update_all)
 
         top_layout.addWidget(btn_back)
@@ -186,7 +190,7 @@ class GitHubContentView(QWidget):
         self.txt_url = QLineEdit(
             "https://raw.githubusercontent.com/AuroraLegacy/elements/master/core.index"
         )
-        self.btn_download = QPushButton("Download & Install")
+        self.btn_download = QPushButton("Download && Install")
         self.btn_download.setObjectName("PrimaryBtn")
         self.btn_download.clicked.connect(self._on_download_clicked)
         url_row.addWidget(self.txt_url, 1)
@@ -210,7 +214,7 @@ class GitHubContentView(QWidget):
         self.btn_5etools_gh = QPushButton("Download 5e.tools Data (GitHub)")
         self.btn_5etools_gh.setObjectName("PrimaryBtn")
         self.btn_5etools_gh.clicked.connect(self.start_5etools_github)
-        self.btn_5etools_local = QPushButton("Import Local 5e.tools Folder…")
+        self.btn_5etools_local = QPushButton("Import Local 5e.tools Folder")
         self.btn_5etools_local.clicked.connect(self.start_5etools_local)
         ft_layout.addWidget(self.btn_5etools_gh)
         ft_layout.addWidget(self.btn_5etools_local)
@@ -332,7 +336,9 @@ class GitHubContentView(QWidget):
         self._run_worker("5etools_github")
 
     def start_5etools_local(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select 5e.tools data/ Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select 5e.tools data/ Folder", str(get_os_downloads_dir())
+        )
         if folder:
             self._run_worker("5etools_local", local_dir=Path(folder))
 

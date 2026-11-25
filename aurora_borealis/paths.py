@@ -1,4 +1,4 @@
-"""OS-standard data, config, and Documents folder resolution."""
+"""OS-standard data, config, Documents, and Downloads folder resolution."""
 
 from __future__ import annotations
 
@@ -6,49 +6,62 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Callable, Optional
 
-from .platform_utils import get_windows_documents_dir, is_windows
+from .platform_utils import get_windows_documents_dir, get_windows_downloads_dir, is_windows
 
 
-def get_os_documents_dir() -> Path:
-    """Detect the OS standard Documents folder without creating ~/Documents blindly."""
+def _detect_os_known_dir(
+    win_getter: Callable[[], Optional[Path]],
+    xdg_name: str,
+    xdg_env_key: str,
+    qt_loc_name: str,
+    fallback_names: tuple[str, ...],
+) -> Path:
+    """Detect an OS standard user directory (Documents / Downloads) without fabricating it."""
     home = Path.home()
 
+    def _valid(cand: Optional[Path]) -> Optional[Path]:
+        if cand is not None and cand.is_dir() and cand.resolve() != home.resolve():
+            return cand
+        return None
+
     if is_windows():
-        win_docs = get_windows_documents_dir()
-        if win_docs is not None and win_docs.is_dir() and win_docs.resolve() != home.resolve():
-            return win_docs
+        hit = _valid(win_getter())
+        if hit is not None:
+            return hit
 
         try:
             from PySide6.QtCore import QStandardPaths
 
-            loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+            loc_enum = getattr(QStandardPaths.StandardLocation, qt_loc_name)
+            loc = QStandardPaths.writableLocation(loc_enum)
             if loc:
-                cand = Path(loc)
-                if cand.is_dir() and cand.resolve() != home.resolve():
-                    return cand
+                hit = _valid(Path(loc))
+                if hit is not None:
+                    return hit
         except Exception:
             pass
 
-        for folder_name in ("Documents", "Dokumente"):
+        for folder_name in fallback_names:
             cand = home / folder_name
             if cand.is_dir():
                 return cand
         return home
 
-    # 1. xdg-user-dir DOCUMENTS
+    # 1. xdg-user-dir <TYPE>
     try:
         proc = subprocess.run(
-            ["xdg-user-dir", "DOCUMENTS"],
+            ["xdg-user-dir", xdg_name],
             capture_output=True,
             text=True,
             timeout=2,
             check=False,
         )
-        if proc.returncode == 0:
-            cand = Path(proc.stdout.strip())
-            if cand.is_dir() and cand.resolve() != home.resolve():
-                return cand
+        if proc.returncode == 0 and proc.stdout.strip():
+            hit = _valid(Path(proc.stdout.strip()))
+            if hit is not None:
+                return hit
     except Exception:
         pass
 
@@ -57,35 +70,58 @@ def get_os_documents_dir() -> Path:
     if user_dirs.is_file():
         try:
             text = user_dirs.read_text(encoding="utf-8", errors="ignore")
-            m = re.search(r'^XDG_DOCUMENTS_DIR="([^"]+)"', text, re.MULTILINE)
+            m = re.search(rf'^{xdg_env_key}="([^"]+)"', text, re.MULTILINE)
             if m:
                 raw = m.group(1).replace("$HOME", str(home))
-                cand = Path(os.path.expandvars(raw)).expanduser()
-                if cand.is_dir() and cand.resolve() != home.resolve():
-                    return cand
+                hit = _valid(Path(os.path.expandvars(raw)).expanduser())
+                if hit is not None:
+                    return hit
         except Exception:
             pass
 
-    # 3. Qt QStandardPaths DocumentsLocation
+    # 3. Qt QStandardPaths
     try:
         from PySide6.QtCore import QStandardPaths
 
-        loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        loc_enum = getattr(QStandardPaths.StandardLocation, qt_loc_name)
+        loc = QStandardPaths.writableLocation(loc_enum)
         if loc:
-            cand = Path(loc)
-            if cand.is_dir() and cand.resolve() != home.resolve():
-                return cand
+            hit = _valid(Path(loc))
+            if hit is not None:
+                return hit
     except Exception:
         pass
 
-    # 4. Existing localized Documents directories
-    for folder_name in ("Documents", "Dokumente"):
+    # 4. Existing localized directories
+    for folder_name in fallback_names:
         cand = home / folder_name
         if cand.is_dir():
             return cand
 
-    # 5. Fallback to home directory (do not fabricate ~/Documents)
+    # 5. Fallback to home directory
     return home
+
+
+def get_os_documents_dir() -> Path:
+    """Detect the OS standard Documents folder without creating ~/Documents blindly."""
+    return _detect_os_known_dir(
+        get_windows_documents_dir,
+        xdg_name="DOCUMENTS",
+        xdg_env_key="XDG_DOCUMENTS_DIR",
+        qt_loc_name="DocumentsLocation",
+        fallback_names=("Documents", "Dokumente"),
+    )
+
+
+def get_os_downloads_dir() -> Path:
+    """Detect the OS standard Downloads folder without creating ~/Downloads blindly."""
+    return _detect_os_known_dir(
+        get_windows_downloads_dir,
+        xdg_name="DOWNLOAD",
+        xdg_env_key="XDG_DOWNLOAD_DIR",
+        qt_loc_name="DownloadLocation",
+        fallback_names=("Downloads",),
+    )
 
 
 def get_default_characters_dir() -> Path:

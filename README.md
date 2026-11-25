@@ -39,7 +39,7 @@ Launch the graphical **Linux Setup Wizard** (supports both **Install / Repair** 
 Or run the headless CLI installer directly (add `--install-aurora-legacy` and/or `--install-5etools` to pre-download content):
 
 ```bash
-./install-linux.sh
+./installer/install-linux.sh
 ```
 
 Run directly from the repo after dependencies are installed:
@@ -51,29 +51,27 @@ Run directly from the repo after dependencies are installed:
 To install only the desktop entry & MIME associations for the current folder:
 
 ```bash
-./install-desktop.sh
+./installer/install-linux.sh --desktop-only
 ```
 
 To uninstall on Linux via CLI (keeps your characters in Documents; add `--purge-config` to also clear config/caches):
 
 ```bash
-./uninstall-linux.sh
+./installer/uninstall-linux.sh
 ```
 
 ## Installing & Running on Windows
 
 Double-click **`setup-wizard-windows.bat`** to launch the graphical **Windows Setup Wizard** (supports both **Install / Repair** and **Uninstall**, target directory picker, optional **Aurora Legacy** & **5e.tools** content pack download during install, Desktop shortcut, `.dnd5e`/`.dnd55e`/`.dndcomp` associations, and automatic Python/7-Zip check via `winget`).
 
-Or double-click **`install-windows.bat`** (headless PowerShell installer) / run in PowerShell (with optional `-InstallAuroraLegacy` / `-InstallFiveTools`):
+Or run the PowerShell installer directly (with optional `-InstallAuroraLegacy` / `-InstallFiveTools`):
 
 ```powershell
-.\install-windows.ps1 -CreateDesktopShortcut -RegisterFileAssociations
+.\installer\install-windows.ps1 -CreateDesktopShortcut -RegisterFileAssociations
 ```
 
-Launch anytime via the Start Menu, Desktop shortcut, `aurora-borealis.bat`, or `.\aurora-borealis.ps1`.
-To uninstall on Windows (keeps your characters), use **Settings → Apps → Aurora Borealis**, run the **Aurora Borealis Setup Wizard** from the Start Menu, or run `.\uninstall-windows.ps1` (`-PurgeConfig` optionally clears config/cache).
-
-For a standalone `.exe` / Inno Setup Windows installer bundle (`AuroraBorealis-Setup.exe`), see `packaging/windows/build-windows-installer.ps1`.
+Launch anytime via the Start Menu, Desktop shortcut, or `aurora-borealis.bat`.
+To uninstall on Windows (keeps your characters), use **Settings → Apps → Aurora Borealis**, run the **Aurora Borealis Setup Wizard** from the Start Menu, or run `.\installer\uninstall-windows.ps1` (`-PurgeConfig` optionally clears config/cache).
 
 ## Optional CLI Flags
 

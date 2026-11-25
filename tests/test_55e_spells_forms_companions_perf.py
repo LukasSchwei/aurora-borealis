@@ -670,26 +670,34 @@ class FeatureSuiteTests(unittest.TestCase):
         # 3. Linux & Windows installer files & syntax checks + isolated desktop installer run
         root_dir = Path(__file__).resolve().parent.parent
         for rel in (
-            "install-linux.sh",
-            "uninstall-linux.sh",
-            "install-desktop.sh",
+            "setup-wizard-linux.sh",
+            "installer/install-linux.sh",
+            "installer/uninstall-linux.sh",
+            "installer/linux_wizard.py",
             "aurora-borealis",
-            "install-windows.bat",
-            "install-windows.ps1",
-            "uninstall-windows.ps1",
+            "setup-wizard-windows.bat",
+            "installer/windows_wizard.ps1",
+            "installer/install-windows.ps1",
+            "installer/uninstall-windows.ps1",
             "aurora-borealis.bat",
-            "aurora-borealis.ps1",
-            "packaging/windows/aurora-borealis.iss",
-            "packaging/windows/build-windows-installer.ps1",
         ):
             self.assertTrue((root_dir / rel).is_file(), f"Missing installer/launcher: {rel}")
+
+        for removed in (
+            "aurora-borealis.ps1",
+            "install-windows.bat",
+            "install-desktop.sh",
+            "requirements.txt",
+            "packaging/windows/aurora-borealis.iss",
+        ):
+            self.assertFalse((root_dir / removed).exists(), f"Redundant file should be removed: {removed}")
 
         with tempfile.TemporaryDirectory() as fake_home:
             env = dict(os.environ)
             env["HOME"] = fake_home
             env["XDG_DATA_HOME"] = str(Path(fake_home) / ".local" / "share")
             proc = subprocess.run(
-                ["bash", str(root_dir / "install-desktop.sh")],
+                ["bash", str(root_dir / "installer" / "install-linux.sh"), "--desktop-only"],
                 env=env,
                 capture_output=True,
                 text=True,

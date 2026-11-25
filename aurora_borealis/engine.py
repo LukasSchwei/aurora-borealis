@@ -95,6 +95,50 @@ def is_synthetic_asi_id(eid: str) -> bool:
     return bool(eid and eid.startswith(SYNTHETIC_ASI_PREFIX))
 
 
+def effective_selection_slot_count(
+    active_sel: ActiveSelection,
+    state: CharacterState,
+    computed: ComputedCharacter,
+) -> int:
+    """Return how many picks an active selection can actually offer (capped by available options)."""
+    rule_num = max(0, int(active_sel.rule.number or 0))
+    if rule_num == 0:
+        return 0
+    if any(is_synthetic_asi_id(opt_id) for opt_id, _ in active_sel.options):
+        return rule_num
+    distinct_opts = {opt_id for opt_id, _ in active_sel.options if opt_id}
+    if active_sel.rule.type == "List":
+        return min(rule_num, len(distinct_opts))
+    chosen = state.selections.get(active_sel.key, [])
+    chosen_set = {v for v in chosen[:rule_num] if v}
+    all_granted_ids = {el.id for el in computed.granted_elements}
+    other_sel_ids = {
+        sv
+        for skey, svals in state.selections.items()
+        if skey != active_sel.key
+        for sv in svals
+        if sv
+    }
+    blocked = (all_granted_ids - chosen_set) | other_sel_ids
+    selectable = {opt_id for opt_id in distinct_opts if opt_id not in blocked}
+    return min(rule_num, len(selectable))
+
+
+def selection_filled_count(
+    active_sel: ActiveSelection,
+    state: CharacterState,
+    effective_count: int,
+) -> int:
+    """Return the number of filled selections capped by effective_count."""
+    if effective_count <= 0:
+        return 0
+    chosen = state.selections.get(active_sel.key, [])
+    return min(
+        effective_count,
+        sum(1 for v in chosen[: max(effective_count, int(active_sel.rule.number or 0))] if v),
+    )
+
+
 def is_asi_select_rule(sel: SelectRule) -> bool:
     """Return True if sel represents an Ability Score Improvement selection."""
     stype = (sel.type or "").strip().lower()

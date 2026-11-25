@@ -8,6 +8,39 @@ from pathlib import Path
 
 from .paths import get_default_characters_dir
 
+UI_ZOOM_STAGES: tuple[tuple[float, str], ...] = (
+    (0.8, "Compact"),
+    (0.9, "Small"),
+    (1.0, "Normal"),
+    (1.1, "Large"),
+    (1.2, "Extra Large"),
+)
+
+
+def snap_ui_scale(scale: float) -> float:
+    """Snap any UI scale float to the nearest supported zoom stage."""
+    try:
+        val = float(scale)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(UI_ZOOM_STAGES, key=lambda st: (abs(st[0] - val), st[0]))[0]
+
+
+def get_zoom_stage_index(scale: float) -> int:
+    """Return the index (0..4) of the zoom stage matching ``scale``."""
+    snapped = snap_ui_scale(scale)
+    for idx, (val, _name) in enumerate(UI_ZOOM_STAGES):
+        if abs(val - snapped) < 1e-6:
+            return idx
+    return 2
+
+
+def get_zoom_stage_label(scale: float) -> str:
+    """Return human-readable zoom stage label like ``'Normal (100%)'``."""
+    idx = get_zoom_stage_index(scale)
+    val, name = UI_ZOOM_STAGES[idx]
+    return f"{name} ({round(val * 100)}%)"
+
 
 def default_characters_dir() -> str:
     return str(get_default_characters_dir())
@@ -40,7 +73,7 @@ def load_config(config_path: Path) -> AppConfig:
         raw_scale = float(raw.get("ui_scale", 1.0))
     except (TypeError, ValueError):
         raw_scale = 1.0
-    ui_scale = max(0.85, min(1.5, raw_scale))
+    ui_scale = snap_ui_scale(raw_scale)
 
     return AppConfig(
         characters_dir=str(raw.get("characters_dir") or default_characters_dir()),

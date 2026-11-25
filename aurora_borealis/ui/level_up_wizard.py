@@ -39,10 +39,12 @@ from PySide6.QtWidgets import (
 from ..engine import (
     RulesEngine,
     check_multiclass_prerequisites,
+    effective_selection_slot_count,
     is_asi_select_rule,
     is_spell_eligible_for_caster,
     is_synthetic_asi_id,
     parse_hit_die,
+    selection_filled_count,
 )
 from ..level_up import (
     apply_level_up_step,
@@ -52,6 +54,7 @@ from ..level_up import (
 )
 from ..loader import ContentRepository
 from ..models import ABILITIES, ABILITY_ABBR, ActiveSelection, CharacterState, ClassSpellcasting, ComputedCharacter, Element
+from .icons import apply_button_icon, refresh_themed_icons
 from .ui_helpers import configure_dropdown_combo, ensure_widgets_fit, install_global_wheel_filter
 
 
@@ -59,8 +62,8 @@ class LevelUpWizardDialog(QDialog):
     """5-step guided Level-Up Wizard with live Before/After diff."""
 
     _STEP_TITLES = [
-        "1. Class & HP",
-        "2. Features & Choices",
+        "1. Class && HP",
+        "2. Features && Choices",
         "3. ASI / Feat",
         "4. Spells",
         "5. Review Diff",
@@ -102,6 +105,10 @@ class LevelUpWizardDialog(QDialog):
         self._init_step0_options()
         self._rebuild_draft()
         self._go_to_page(0)
+        theme = "dark"
+        if parent is not None and hasattr(parent, "config"):
+            theme = getattr(parent.config, "theme", "dark")
+        refresh_themed_icons(self, theme)
         ensure_widgets_fit(self)
 
     def _build_ui(self) -> None:
@@ -138,13 +145,16 @@ class LevelUpWizardDialog(QDialog):
         footer = QHBoxLayout()
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.clicked.connect(self.reject)
-        self.btn_back = QPushButton("← Back")
+        self.btn_back = QPushButton("Back")
+        apply_button_icon(self.btn_back, "arrow-left", size=15)
         self.btn_back.clicked.connect(self.go_back)
-        self.btn_next = QPushButton("Next →")
+        self.btn_next = QPushButton("Next")
         self.btn_next.setObjectName("PrimaryBtn")
+        apply_button_icon(self.btn_next, "arrow-right", size=15)
         self.btn_next.clicked.connect(self.go_next)
-        self.btn_apply = QPushButton("✓ Apply Level Up")
+        self.btn_apply = QPushButton("Apply Level Up")
         self.btn_apply.setObjectName("PrimaryBtn")
+        apply_button_icon(self.btn_apply, "check", size=15)
         self.btn_apply.clicked.connect(self._on_apply)
 
         footer.addWidget(self.btn_cancel)
@@ -213,7 +223,8 @@ class LevelUpWizardDialog(QDialog):
         self.spn_hp_roll.setRange(1, 12)
         self.spn_hp_roll.setFixedWidth(96)
         self.spn_hp_roll.valueChanged.connect(self._on_hp_choice_changed)
-        self.btn_roll_die = QPushButton("🎲 Roll 1d8")
+        self.btn_roll_die = QPushButton("Roll 1d8")
+        apply_button_icon(self.btn_roll_die, "dice", size=15)
         self.btn_roll_die.clicked.connect(self._roll_hp_die)
         roll_row.addWidget(self.spn_hp_roll)
         roll_row.addWidget(self.btn_roll_die)
@@ -247,7 +258,7 @@ class LevelUpWizardDialog(QDialog):
         self.feat_desc_browser.setOpenExternalLinks(True)
         ll.addWidget(self.feat_desc_browser, 1)
 
-        right = QGroupBox("Subclass & Feature Choices")
+        right = QGroupBox("Subclass && Feature Choices")
         rl = QVBoxLayout(right)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -414,7 +425,7 @@ class LevelUpWizardDialog(QDialog):
         rbl = QVBoxLayout(right_box)
         rbl.setContentsMargins(0, 0, 0, 0)
 
-        added_grp = QGroupBox("Current & Added Spells (This Class)")
+        added_grp = QGroupBox("Current && Added Spells (This Class)")
         agl = QVBoxLayout(added_grp)
         self.lst_added_spells = QListWidget()
         self.lst_added_spells.currentItemChanged.connect(self._on_added_spell_preview)
@@ -529,7 +540,7 @@ class LevelUpWizardDialog(QDialog):
         self._updating = True
         try:
             self.spn_hp_roll.setRange(1, hd_num)
-            self.btn_roll_die.setText(f"🎲 Roll 1d{hd_num}")
+            self.btn_roll_die.setText(f"Roll 1d{hd_num}")
             is_rolled = self.rad_hp_roll.isChecked()
             self.spn_hp_roll.setEnabled(is_rolled)
             self.btn_roll_die.setEnabled(is_rolled)
@@ -631,17 +642,28 @@ class LevelUpWizardDialog(QDialog):
                 continue
             if not spell_only and (is_spell or is_asi_select_rule(active_sel.rule)):
                 continue
-            chosen = self._draft_state.selections.get(active_sel.key, [])
-            filled = sum(1 for i in range(active_sel.rule.number) if i < len(chosen) and chosen[i])
-            if active_sel.key not in before_keys or filled < active_sel.rule.number:
+            eff_num = effective_selection_slot_count(active_sel, self._draft_state, self._draft_comp)
+            if eff_num == 0:
+                continue
+            filled = selection_filled_count(active_sel, self._draft_state, eff_num)
+            if active_sel.key not in before_keys or filled < eff_num:
                 out.append(active_sel)
         return out
 
     def _render_selection_card(self, active_sel: ActiveSelection, target_layout: QVBoxLayout) -> None:
-        chosen = self._draft_state.selections.get(active_sel.key, [])
-        filled = sum(1 for i in range(active_sel.rule.number) if i < len(chosen) and chosen[i])
+        eff_num = effective_selection_slot_count(active_sel, self._draft_state, self._draft_comp)
+        filled = selection_filled_count(active_sel, self._draft_state, eff_num)
+        chosen = list(self._draft_state.selections.get(active_sel.key, []))
+        slot_vals = list(chosen[:eff_num])
+        if any(chosen[eff_num:]):
+            compacted = [v for v in chosen if v]
+            slot_vals = (compacted + [""] * eff_num)[:eff_num]
+        else:
+            while len(slot_vals) < eff_num:
+                slot_vals.append("")
+
         card = QFrame()
-        card.setObjectName("ChoiceCard" if (filled >= active_sel.rule.number or active_sel.rule.optional) else "ChoiceCardPending")
+        card.setObjectName("ChoiceCard" if (filled >= eff_num or active_sel.rule.optional) else "ChoiceCardPending")
         vl = QVBoxLayout(card)
         vl.setContentsMargins(10, 8, 10, 8)
         vl.setSpacing(6)
@@ -651,14 +673,32 @@ class LevelUpWizardDialog(QDialog):
         lbl_hdr.setWordWrap(True)
         vl.addWidget(lbl_hdr)
 
+        if eff_num == 0:
+            lbl_done = QLabel("All available options are already granted.")
+            lbl_done.setObjectName("MutedText")
+            vl.addWidget(lbl_done)
+            target_layout.addWidget(card)
+            return
+
         all_granted = {e.id for e in self._draft_comp.granted_elements}
-        for slot_idx in range(active_sel.rule.number):
+        other_sel_ids = {
+            sv
+            for skey, svals in self._draft_state.selections.items()
+            if skey != active_sel.key
+            for sv in svals
+            if sv
+        }
+        for slot_idx in range(eff_num):
             cmb = QComboBox()
             configure_dropdown_combo(cmb, max_visible=14)
             cmb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             cmb.addItem("— Choose —", "")
-            cur_val = chosen[slot_idx] if slot_idx < len(chosen) else ""
-            taken = set(all_granted) if active_sel.rule.type != "List" else set()
+            cur_val = slot_vals[slot_idx]
+            same_sel_other = {slot_vals[i] for i in range(eff_num) if i != slot_idx and slot_vals[i]}
+            taken = set(same_sel_other)
+            if active_sel.rule.type != "List":
+                taken |= all_granted
+                taken |= other_sel_ids
             taken.discard(cur_val)
             seen: set[str] = set()
             for opt_id, opt_name in active_sel.options:
@@ -671,12 +711,15 @@ class LevelUpWizardDialog(QDialog):
                 if idx >= 0:
                     cmb.setCurrentIndex(idx)
 
-            def make_cb(skey: str, sidx: int, count: int, combo_ref: QComboBox):
+            def make_cb(skey: str, sidx: int, count: int, combo_ref: QComboBox, seed_vals: list[str]):
                 def _changed(_i: int) -> None:
                     if self._updating:
                         return
                     val = combo_ref.currentData() or ""
-                    lst = list(self._draft_state.selections.get(skey, [""] * count))
+                    lst = list(seed_vals)
+                    raw_lst = self._draft_state.selections.get(skey, [])
+                    if len(raw_lst) >= count and not any(raw_lst[count:]):
+                        lst = list(raw_lst[:count])
                     while len(lst) < count:
                         lst.append("")
                     lst[sidx] = val
@@ -690,7 +733,7 @@ class LevelUpWizardDialog(QDialog):
 
                 return _changed
 
-            cmb.currentIndexChanged.connect(make_cb(active_sel.key, slot_idx, active_sel.rule.number, cmb))
+            cmb.currentIndexChanged.connect(make_cb(active_sel.key, slot_idx, eff_num, cmb, slot_vals))
             vl.addWidget(cmb)
         target_layout.addWidget(card)
 
