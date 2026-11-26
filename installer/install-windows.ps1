@@ -244,7 +244,7 @@ if ($DoFileAssociations) {
 $UninstallKey = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\AuroraBorealis"
 New-Item -Path $UninstallKey -Force | Out-Null
 Set-ItemProperty -Path $UninstallKey -Name "DisplayName" -Value "Aurora Borealis (D&D 5e / 5.5e)"
-Set-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value "0.1.0"
+Set-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value "0.1.2"
 Set-ItemProperty -Path $UninstallKey -Name "Publisher" -Value "Aurora Borealis"
 Set-ItemProperty -Path $UninstallKey -Name "InstallLocation" -Value $TargetDir
 Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\installer\windows_wizard.ps1`" -InitialAction Uninstall"

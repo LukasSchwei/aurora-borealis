@@ -188,14 +188,15 @@ _HELVETICA_CHAR_WIDTHS: dict[str, int] = {
 }
 
 
-def _helvetica_text_width(text: str, pt: float) -> float:
+def _helvetica_text_width(text: str, pt: float, bold: bool = False) -> float:
     if not text:
         return 0.0
     total = sum(_HELVETICA_CHAR_WIDTHS.get(ch, 556 if ord(ch) < 128 else 650) for ch in text)
-    return (total / 1000.0) * pt * 1.06
+    mult = 1.12 * (1.09 if bold else 1.0)
+    return (total / 1000.0) * pt * mult
 
 
-def _wrap_helvetica_lines(text: str, pt: float, max_w: float) -> tuple[list[str], bool]:
+def _wrap_helvetica_lines(text: str, pt: float, max_w: float, bold: bool = False) -> tuple[list[str], bool]:
     lines: list[str] = []
     word_overflow = False
     for para in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -205,13 +206,13 @@ def _wrap_helvetica_lines(text: str, pt: float, max_w: float) -> tuple[list[str]
             continue
         cur = ""
         for word in stripped.split():
-            if _helvetica_text_width(word, pt) > max_w:
+            if _helvetica_text_width(word, pt, bold=bold) > max_w:
                 word_overflow = True
             if not cur:
                 cur = word
             else:
                 cand = f"{cur} {word}"
-                if _helvetica_text_width(cand, pt) <= max_w:
+                if _helvetica_text_width(cand, pt, bold=bold) <= max_w:
                     cur = cand
                 else:
                     lines.append(cur)
@@ -219,6 +220,24 @@ def _wrap_helvetica_lines(text: str, pt: float, max_w: float) -> tuple[list[str]
         if cur:
             lines.append(cur)
     return (lines or [""]), word_overflow
+
+
+def _candidate_font_sizes(max_pt: float, min_pt: float) -> list[float]:
+    """Build descending candidate point sizes from `max_pt` down to `min_pt` with fine steps at small sizes."""
+    hi = max(min_pt, round(float(max_pt) * 4) / 4)
+    lo = max(0.25, float(min_pt))
+    sizes: list[float] = []
+    pt = hi
+    while pt >= lo - 1e-6:
+        sizes.append(round(pt, 2))
+        step = 0.25 if pt > 2.5 else 0.1
+        nxt = round(pt - step, 2)
+        if nxt >= pt:
+            break
+        pt = nxt
+    if not sizes or sizes[-1] > round(lo, 2) + 1e-6:
+        sizes.append(round(lo, 2))
+    return sizes
 
 
 def _parse_da(da: str) -> tuple[str, Optional[float], str]:
@@ -251,9 +270,10 @@ def _compute_acroform_da(
     base_da: str = "",
     override_da: Optional[str] = None,
     default_multiline_pt: float = 8.0,
-    min_pt: float = 1.5,
+    min_pt: float = 0.5,
+    border_w: float = 0.0,
 ) -> str:
-    """Compute a Helvetica /DA string whose font size fits cleanly inside `rect`."""
+    """Compute a Helvetica /DA string whose font size scales down cleanly to fit inside `rect`."""
     font_tok, ov_sz, color_ops = _parse_da(override_da or "")
     if not override_da:
         font_tok, base_sz, color_ops = _parse_da(base_da or "")
@@ -284,29 +304,64 @@ def _compute_acroform_da(
     if not text.strip():
         return f"{font_tok} {_fmt_pt(max_pt)} Tf {color_ops}"
 
+    tok_low = font_tok.lower()
+    is_bold = any(marker in tok_low for marker in ("hebo", "bold", "helvb", "-bd"))
+    bw = max(0.0, float(border_w))
+
     if not is_multiline:
-        usable_w = max(4.0, rw - 3.5)
-        usable_h = max(4.0, rh - 1.5)
-        pt = max_pt
-        best_pt = min_pt
-        while pt >= min_pt - 1e-6:
+        single_txt = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
+        usable_w = max(4.0, rw - max(5.0, bw * 2.0 + 3.5))
+        usable_h = max(4.0, rh - max(2.0, bw * 2.0 + 1.0))
+        candidates = _candidate_font_sizes(max_pt, min_pt)
+        best_pt = candidates[-1]
+        for pt in candidates:
             best_pt = pt
-            if _helvetica_text_width(text.strip(), pt) <= usable_w and pt * 1.12 <= usable_h:
+            if _helvetica_text_width(single_txt, pt, bold=is_bold) <= usable_w and pt * 1.18 <= usable_h:
                 return f"{font_tok} {_fmt_pt(pt)} Tf {color_ops}"
-            pt = round(pt - 0.25, 2)
         return f"{font_tok} {_fmt_pt(best_pt)} Tf {color_ops}"
 
-    usable_w = max(4.0, rw - 5.0)
-    usable_h = max(4.0, rh - 4.0)
-    pt = max_pt
-    best_pt = min_pt
-    while pt >= min_pt - 1e-6:
+    usable_w = max(4.0, rw - max(8.0, bw * 2.0 + 6.0))
+    usable_h = max(4.0, rh - max(6.0, bw * 2.0 + 4.0))
+    candidates = _candidate_font_sizes(max_pt, min_pt)
+    best_pt = candidates[-1]
+    for pt in candidates:
         best_pt = pt
-        lines, word_overflow = _wrap_helvetica_lines(text, pt, usable_w)
-        if not word_overflow and (len(lines) * pt * 1.24) <= usable_h:
+        lines, word_overflow = _wrap_helvetica_lines(text, pt, usable_w, bold=is_bold)
+        if not word_overflow and (len(lines) * pt * 1.35) <= usable_h:
             return f"{font_tok} {_fmt_pt(pt)} Tf {color_ops}"
-        pt = round(pt - 0.25, 2)
     return f"{font_tok} {_fmt_pt(best_pt)} Tf {color_ops}"
+
+
+def _resolve_qpdf_border_width(val_dict: dict, objects: dict) -> float:
+    bs = val_dict.get("/BS")
+    if isinstance(bs, str):
+        bs = objects.get(f"obj:{bs}", {}).get("value")
+    if isinstance(bs, dict) and isinstance(bs.get("/W"), (int, float)):
+        return max(0.0, float(bs["/W"]))
+    border = val_dict.get("/Border")
+    if isinstance(border, list) and len(border) >= 3 and isinstance(border[2], (int, float)):
+        return max(0.0, float(border[2]))
+    return 0.0
+
+
+def _resolve_pypdf_border_width(annot) -> float:
+    bs = annot.get("/BS")
+    if bs is not None:
+        bs_obj = bs.get_object() if hasattr(bs, "get_object") else bs
+        if hasattr(bs_obj, "get") and bs_obj.get("/W") is not None:
+            try:
+                return max(0.0, float(bs_obj["/W"]))
+            except Exception:
+                pass
+    border = annot.get("/Border")
+    if border is not None:
+        border_obj = border.get_object() if hasattr(border, "get_object") else border
+        if isinstance(border_obj, (list, tuple)) and len(border_obj) >= 3:
+            try:
+                return max(0.0, float(border_obj[2]))
+            except Exception:
+                pass
+    return 0.0
 
 
 def _resolve_qpdf_rect(val_dict: dict, objects: dict) -> Optional[list]:
@@ -407,11 +462,14 @@ def _fill_pdf_form_pypdf(
                 if ff_val is None:
                     ff_val = ff_map.get(fname.strip())
                 if ff_val is not None:
-                    annot[NameObject("/Ff")] = NumberObject(int(ff_val))
-                    eff_ff = int(ff_val)
+                    eff_ff = int(ff_val) & ~(1 << 23)
+                    annot[NameObject("/Ff")] = NumberObject(eff_ff)
                 else:
                     raw_ff = _resolve_pypdf_inherited(annot, "/Ff")
                     eff_ff = int(raw_ff) if raw_ff is not None else 0
+                    if eff_ff & (1 << 23):
+                        eff_ff &= ~(1 << 23)
+                        annot[NameObject("/Ff")] = NumberObject(eff_ff)
                 is_multiline = bool(eff_ff & 4096)
 
                 da_val = da_map.get(fname) or da_map.get(fname.strip())
@@ -419,6 +477,7 @@ def _fill_pdf_form_pypdf(
                 base_da = str(raw_da) if raw_da is not None else ""
                 raw_rect = annot.get("/Rect")
                 rect = [float(x) for x in raw_rect] if raw_rect and len(raw_rect) == 4 else None
+                border_w = _resolve_pypdf_border_width(annot)
                 fitted_da = _compute_acroform_da(
                     txt,
                     rect,
@@ -426,6 +485,7 @@ def _fill_pdf_form_pypdf(
                     base_da=base_da,
                     override_da=da_val,
                     default_multiline_pt=8.0,
+                    border_w=border_w,
                 )
                 annot[NameObject("/DA")] = TextStringObject(fitted_da)
                 if "/AP" in annot:
@@ -538,17 +598,21 @@ def fill_pdf_form_qpdf(
             if ff_val is None:
                 ff_val = ff_map.get(fullname.strip())
             if ff_val is not None:
-                val_dict["/Ff"] = int(ff_val)
-                eff_ff = int(ff_val)
+                eff_ff = int(ff_val) & ~(1 << 23)
+                val_dict["/Ff"] = eff_ff
             else:
                 raw_ff = _resolve_qpdf_inherited(val_dict, objects, "/Ff")
                 eff_ff = int(raw_ff) if isinstance(raw_ff, (int, float)) else 0
+                if eff_ff & (1 << 23):
+                    eff_ff &= ~(1 << 23)
+                    val_dict["/Ff"] = eff_ff
             is_multiline = bool(eff_ff & 4096)
 
             da_val = da_map.get(fullname) or da_map.get(fullname.strip())
             raw_da = _resolve_qpdf_inherited(val_dict, objects, "/DA")
             base_da = str(raw_da) if raw_da is not None else ""
             rect = _resolve_qpdf_rect(val_dict, objects)
+            border_w = _resolve_qpdf_border_width(val_dict, objects)
             fitted_da = _compute_acroform_da(
                 txt,
                 rect,
@@ -556,6 +620,7 @@ def fill_pdf_form_qpdf(
                 base_da=base_da,
                 override_da=da_val,
                 default_multiline_pt=8.0,
+                border_w=border_w,
             )
             val_dict["/DA"] = fitted_da if fitted_da.startswith(("u:", "b:")) else f"u:{fitted_da}"
             val_dict.pop("/AP", None)
@@ -730,14 +795,17 @@ def _overlay_5e_appearance(
 
     with tempfile.TemporaryDirectory(prefix="aurora_5e_app_") as tmpdir:
         overlay_pdf = Path(tmpdir) / "app_overlay.pdf"
+        dpi_s = _OVERLAY_PDF_DPI / 72.0
         writer = QPdfWriter(str(overlay_pdf))
-        writer.setResolution(72)
+        writer.setResolution(_OVERLAY_PDF_DPI)
         writer.setPageSize(QPageSize(QSizeF(612, 792), QPageSize.Unit.Point))
         writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Point)
         painter = QPainter(writer)
         try:
             # Page 1: blank
             writer.newPage()
+            painter.resetTransform()
+            painter.scale(dpi_s, dpi_s)
             # Page 2: CHARACTER IMAGE box (x=36.5, y=130.5, w=162.7, h=218.1)
             box_x, box_y, box_w, box_h = 41.0, 136.0, 153.0, 206.0
             if img is not None:
@@ -767,6 +835,8 @@ def _overlay_5e_appearance(
                 )
             # Page 3: crisp filled dots for prepared spells (works even where WotC /AP stream is blank)
             writer.newPage()
+            painter.resetTransform()
+            painter.scale(dpi_s, dpi_s)
             if prepared_dot_rects:
                 painter.save()
                 painter.setBrush(QColor("#111827"))
@@ -1004,6 +1074,9 @@ def _wrap_text_no_midword(
     return (lines or [""]), word_overflow
 
 
+_OVERLAY_PDF_DPI = 300
+
+
 def _fit_text_layout(
     text: str,
     w: float,
@@ -1013,15 +1086,29 @@ def _fit_text_layout(
     wrap: bool = False,
     min_size: float = 4.0,
     device=None,
+    align: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+    abs_min_size: float = 0.5,
 ) -> tuple[float, str]:
-    """Shrink font size and/or wrap cleanly on word boundaries so text fits within `(w, h)`."""
+    """Scale font size down (and wrap cleanly on word boundaries when `wrap=True`) so ALL text fits inside `(w, h)` without clipping or truncation."""
     if not text:
         return float(size), ""
     font_family = "Arial" if is_windows() else "Sans Serif"
-    usable_w = max(4.0, float(w) - 1.2)
-    usable_h = max(4.0, float(h))
-    start_pt = max(3.0, float(size))
-    floor_pt = min(start_pt, max(3.0, float(min_size)))
+    dpi_s = 1.0
+    if device is not None and hasattr(device, "logicalDpiY"):
+        try:
+            ld = float(device.logicalDpiY())
+            if ld > 0:
+                dpi_s = ld / 72.0
+        except Exception:
+            dpi_s = 1.0
+
+    usable_w = max(4.0, float(w) - 1.5)
+    usable_h = max(4.0, float(h) - 0.8)
+    usable_w_dev = usable_w * dpi_s
+    usable_h_dev = usable_h * dpi_s
+    start_pt = max(0.5, float(size))
+    hard_floor = min(start_pt, max(0.25, float(abs_min_size)))
+    align_int = int(align)
 
     def _metrics(pt: float) -> QFontMetricsF:
         f = QFont(font_family)
@@ -1029,63 +1116,63 @@ def _fit_text_layout(
         f.setBold(bold)
         return QFontMetricsF(f, device) if device is not None else QFontMetricsF(f)
 
-    if not wrap:
-        pt = start_pt
-        min_single_pt = min(floor_pt, 2.5)
-        best_pt = min_single_pt
-        while pt >= min_single_pt - 1e-6:
-            fm = _metrics(pt)
-            tw = max(fm.horizontalAdvance(text), fm.boundingRect(text).width())
-            best_pt = pt
-            if tw <= usable_w and fm.height() <= usable_h + 0.5:
-                return pt, text
-            pt = round(pt - 0.25, 2)
-        return best_pt, text
-
-    pt = start_pt
-    best_pt = floor_pt
-    best_lines: list[str] = [text]
-    last_overflow = False
-    last_total_h = 0.0
-    while pt >= floor_pt - 1e-6:
+    def _fits_single(pt: float, single_txt: str) -> bool:
         fm = _metrics(pt)
-        lines, word_overflow = _wrap_text_no_midword(text, fm, usable_w)
-        total_h = max(0, len(lines) - 1) * fm.lineSpacing() + fm.height()
-        best_pt = pt
-        best_lines = lines
-        last_overflow = word_overflow
-        last_total_h = total_h
-        if not word_overflow and total_h <= usable_h + 0.5:
-            return pt, "\n".join(lines)
-        pt = round(pt - 0.25, 2)
+        tw = max(fm.horizontalAdvance(single_txt), fm.boundingRect(single_txt).width())
+        br = fm.boundingRect(QRectF(0.0, 0.0, 1e7, 1e7), align_int, single_txt)
+        th = max(fm.height(), br.height())
+        return max(tw, br.width()) <= usable_w_dev and th <= usable_h_dev + 0.25 * dpi_s
 
-    if (last_overflow or last_total_h > usable_h + 0.5) and best_pt > 2.5:
-        pt = round(best_pt - 0.25, 2)
-        while pt >= 2.5 - 1e-6:
-            fm = _metrics(pt)
-            lines, word_overflow = _wrap_text_no_midword(text, fm, usable_w)
-            total_h = max(0, len(lines) - 1) * fm.lineSpacing() + fm.height()
+    def _layout_wrapped(pt: float) -> tuple[bool, list[str]]:
+        fm = _metrics(pt)
+        lines, word_overflow = _wrap_text_no_midword(text, fm, usable_w_dev)
+        if word_overflow:
+            return False, lines
+        cand = "\n".join(lines)
+        max_line_w = max((fm.horizontalAdvance(ln) for ln in lines), default=0.0)
+        if max_line_w > usable_w_dev:
+            return False, lines
+        line_h = max(0, len(lines) - 1) * fm.lineSpacing() + fm.height()
+        br = fm.boundingRect(QRectF(0.0, 0.0, usable_w_dev + 2.0 * dpi_s, 1e7), align_int, cand)
+        actual_h = max(line_h, br.height())
+        actual_w = max(max_line_w, br.width())
+        return (actual_w <= usable_w_dev + 0.5 * dpi_s and actual_h <= usable_h_dev), lines
+
+    if not wrap:
+        single_txt = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
+        if _fits_single(start_pt, single_txt):
+            return start_pt, single_txt
+        candidates = _candidate_font_sizes(start_pt, hard_floor)
+        lo_idx, hi_idx = 0, len(candidates) - 1
+        best_pt = candidates[-1]
+        while lo_idx <= hi_idx:
+            mid = (lo_idx + hi_idx) // 2
+            pt = candidates[mid]
+            if _fits_single(pt, single_txt):
+                best_pt = pt
+                hi_idx = mid - 1  # Try larger font (earlier index)
+            else:
+                lo_idx = mid + 1  # Need smaller font (later index)
+        return best_pt, single_txt
+
+    ok_start, start_lines = _layout_wrapped(start_pt)
+    if ok_start:
+        return start_pt, "\n".join(start_lines)
+
+    candidates = _candidate_font_sizes(start_pt, hard_floor)
+    lo_idx, hi_idx = 0, len(candidates) - 1
+    best_pt = candidates[-1]
+    _, best_lines = _layout_wrapped(best_pt)
+    while lo_idx <= hi_idx:
+        mid = (lo_idx + hi_idx) // 2
+        pt = candidates[mid]
+        fits, lines = _layout_wrapped(pt)
+        if fits:
             best_pt = pt
             best_lines = lines
-            last_total_h = total_h
-            if not word_overflow and total_h <= usable_h + 0.5:
-                break
-            pt = round(pt - 0.25, 2)
-
-    if last_total_h > usable_h + 0.5 and best_lines:
-        fm = _metrics(best_pt)
-        line_step = max(1.0, fm.lineSpacing())
-        max_lines = max(1, int((usable_h + 0.5 - fm.height()) // line_step) + 1)
-        if len(best_lines) > max_lines:
-            kept = list(best_lines[:max_lines])
-            last_line = kept[-1].rstrip()
-            while last_line and fm.horizontalAdvance(last_line + "…") > usable_w:
-                if " " in last_line:
-                    last_line = last_line.rsplit(" ", 1)[0].rstrip()
-                else:
-                    last_line = last_line[:-1]
-            kept[-1] = (last_line + "…") if last_line else "…"
-            best_lines = kept
+            hi_idx = mid - 1  # Try larger font (earlier index)
+        else:
+            lo_idx = mid + 1  # Need smaller font (later index)
 
     return best_pt, "\n".join(best_lines)
 
@@ -1105,6 +1192,7 @@ def _draw_text(
 ) -> None:
     if not text:
         return
+    device = painter.device()
     fitted_size, fitted_text = _fit_text_layout(
         text,
         w,
@@ -1113,16 +1201,32 @@ def _draw_text(
         bold=bold,
         wrap=wrap,
         min_size=min_size,
-        device=painter.device(),
+        device=device,
+        align=align,
     )
     font = QFont("Arial" if is_windows() else "Sans Serif")
     font.setPointSizeF(fitted_size)
     font.setBold(bold)
+    dpi_s = 1.0
+    if device is not None and hasattr(device, "logicalDpiY"):
+        try:
+            ld = float(device.logicalDpiY())
+            if ld > 0:
+                dpi_s = ld / 72.0
+        except Exception:
+            dpi_s = 1.0
     painter.save()
-    painter.setClipRect(QRectF(x, y, w, h))
+    if dpi_s > 1.01:
+        # Cancel the outer dpi_s coordinate scale so QFont renders at native high-DPI
+        # precision matching QFontMetricsF(font, device) exactly without 72-DPI pixel snapping.
+        painter.scale(1.0 / dpi_s, 1.0 / dpi_s)
+        rect = QRectF(x * dpi_s, y * dpi_s, w * dpi_s, h * dpi_s)
+    else:
+        rect = QRectF(x, y, w, h)
+    painter.setClipRect(rect)
     painter.setFont(font)
     painter.setPen(QColor("#111827"))
-    painter.drawText(QRectF(x, y, w, h), int(align), fitted_text)
+    painter.drawText(rect, int(align), fitted_text)
     painter.restore()
 
 
@@ -1278,15 +1382,16 @@ def export_55e_overlay_pdf(
 
     with tempfile.TemporaryDirectory(prefix="aurora_55e_") as tmpdir:
         overlay_pdf = Path(tmpdir) / "overlay.pdf"
+        dpi_s = _OVERLAY_PDF_DPI / 72.0
         writer = QPdfWriter(str(overlay_pdf))
-        writer.setResolution(72)
+        writer.setResolution(_OVERLAY_PDF_DPI)
         writer.setPageSize(QPageSize(QSizeF(tpl_w, tpl_h), QPageSize.Unit.Point))
         writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Point)
 
         painter = QPainter(writer)
         try:
-            painter.translate(off_x, off_y)
-            painter.scale(scale, scale)
+            painter.translate(off_x * dpi_s, off_y * dpi_s)
+            painter.scale(scale * dpi_s, scale * dpi_s)
 
             # --- PAGE 1 (612 x 792 pt official 2024 sheet coordinates) ---
             _draw_text(painter, 26.6, 18.0, 221.5, 15.0, state.name or "", size=10.5, bold=True)
@@ -1534,8 +1639,8 @@ def export_55e_overlay_pdf(
             # --- PAGE 2 (612 x 792 pt official 2024 sheet coordinates scaled to template) ---
             writer.newPage()
             painter.resetTransform()
-            painter.translate(off_x, off_y)
-            painter.scale(scale, scale)
+            painter.translate(off_x * dpi_s, off_y * dpi_s)
+            painter.scale(scale * dpi_s, scale * dpi_s)
 
             if computed.spellcasting:
                 sc = computed.spellcasting

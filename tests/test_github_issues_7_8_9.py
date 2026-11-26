@@ -20,10 +20,13 @@ from aurora_borealis.engine import RulesEngine
 from aurora_borealis.loader import ContentRepository
 from aurora_borealis.models import CharacterState, ClassLevel, Element, GrantRule, InventoryItem
 from aurora_borealis.pdf_export import (
+    _compute_acroform_da,
+    _fill_pdf_form_pypdf,
     _fit_text_layout,
     _helvetica_text_width,
     _wrap_helvetica_lines,
     export_character_pdf,
+    fill_pdf_form_qpdf,
     format_proficiencies,
     format_proficiency_label,
 )
@@ -449,6 +452,152 @@ class GitHubIssues789Tests(unittest.TestCase):
             export_character_pdf(state, comp, repo, out_pdf)
             self.assertTrue(out_pdf.is_file())
             self.assertTrue(out_pdf.read_bytes().startswith(b"%PDF"))
+
+    def test_all_pdfs_scale_font_down_without_truncation_or_overflow(self) -> None:
+        from PySide6.QtCore import QMarginsF, QRectF, QSizeF
+        from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter
+
+        font_family = "Arial" if is_windows() else "Sans Serif"
+
+        # 1. 5.5e overlay layout never truncates with ellipsis and scales below 2.5pt to fit exact boundingRect
+        chapters = "\n".join(
+            f"Chapter {i}: A remarkably detailed chronicle of heroic deeds across the realm."
+            for i in range(1, 51)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            probe_pdf = Path(tmp) / "probe.pdf"
+            writer = QPdfWriter(str(probe_pdf))
+            writer.setResolution(300)
+            writer.setPageSize(QPageSize(QSizeF(612, 792), QPageSize.Unit.Point))
+            writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Point)
+            dpi_s = writer.logicalDpiY() / 72.0
+
+            pt, fitted = _fit_text_layout(
+                chapters,
+                w=175.8,
+                h=137.3,
+                size=7.5,
+                wrap=True,
+                device=writer,
+                align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+            )
+            self.assertLess(pt, 2.5)
+            self.assertNotIn("…", fitted)
+            self.assertIn("Chapter 1:", fitted)
+            self.assertIn("Chapter 50:", fitted)
+            f = QFont(font_family)
+            f.setPointSizeF(pt)
+            fm = QFontMetricsF(f, writer)
+            br = fm.boundingRect(
+                QRectF(0.0, 0.0, 175.8 * dpi_s, 1e7),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                fitted,
+            )
+            self.assertLessEqual(br.height() / dpi_s, 137.3)
+            self.assertLessEqual(br.width() / dpi_s, 175.8)
+
+            # 2. Extreme single-line text scales below 2.5pt instead of clipping
+            ultra_single = "Bartholomew Maximilian von Aurelius the Undefeated Sovereign of the Northern Wastes"
+            s_pt, s_fitted = _fit_text_layout(ultra_single, w=65.0, h=14.0, size=9.0, wrap=False, device=writer)
+            self.assertLess(s_pt, 2.5)
+            self.assertEqual(s_fitted, ultra_single)
+            sf = QFont(font_family)
+            sf.setPointSizeF(s_pt)
+            sfm = QFontMetricsF(sf, writer)
+            self.assertLessEqual(sfm.horizontalAdvance(s_fitted) / dpi_s, 65.0)
+
+        # 3. AcroForm /DA scales down smoothly below 1.5pt for huge text, accounts for bold & borders
+        da_single = _compute_acroform_da(
+            ultra_single,
+            rect=[0.0, 0.0, 55.0, 14.0],
+            is_multiline=False,
+            base_da="/HeBo 12 Tf 0 g",
+            border_w=1.0,
+        )
+        m_single = re.search(r"([0-9]+(?:\.[0-9]+)?)\s+Tf", da_single)
+        self.assertIsNotNone(m_single)
+        pt_single = float(m_single.group(1))
+        self.assertLess(pt_single, 1.5)
+        self.assertLessEqual(_helvetica_text_width(ultra_single, pt_single, bold=True), 50.0)
+
+        huge_multi = "\n".join(f"Line {i}: Extended inventory and feature catalog entry." for i in range(1, 140))
+        da_multi = _compute_acroform_da(
+            huge_multi,
+            rect=[0.0, 0.0, 120.0, 140.0],
+            is_multiline=True,
+            base_da="/Helv 8 Tf 0 g",
+            border_w=1.0,
+        )
+        m_multi = re.search(r"([0-9]+(?:\.[0-9]+)?)\s+Tf", da_multi)
+        self.assertIsNotNone(m_multi)
+        pt_multi = float(m_multi.group(1))
+        self.assertLess(pt_multi, 1.5)
+        ml_lines, ml_ov = _wrap_helvetica_lines(huge_multi, pt_multi, 112.0)
+        self.assertFalse(ml_ov)
+        self.assertLessEqual(len(ml_lines) * pt_multi * 1.35, 134.0)
+
+        # 4. AcroForm fill (qpdf + pypdf when installed) scales down and clears DoNotScroll
+        tpl_5e = Path(__file__).resolve().parent.parent / "aurora_borealis" / "assets" / "templates" / "dnd5e_sheet.pdf"
+        with tempfile.TemporaryDirectory() as tmp:
+            qpdf_out = Path(tmp) / "qpdf_5e.pdf"
+            fill_pdf_form_qpdf(
+                tpl_5e,
+                {"Wpn Name": ultra_single, "Backstory": chapters},
+                set(),
+                qpdf_out,
+            )
+            self.assertTrue(qpdf_out.is_file())
+            probe = subprocess.run(
+                ["qpdf", "--json", "--json-key=acroform", "--json-key=qpdf", str(qpdf_out)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            pdata = json.loads(probe.stdout)
+            pobjs = pdata["qpdf"][1]
+            qfound: dict[str, tuple[str, int]] = {}
+            for f in pdata["acroform"]["fields"]:
+                fn = f.get("fullname", "")
+                if fn in ("Wpn Name", "Backstory"):
+                    vd = pobjs.get("obj:" + f.get("object", ""), {}).get("value", {})
+                    da_s = str(vd.get("/DA") or "")
+                    if da_s.startswith("u:"):
+                        da_s = da_s[2:]
+                    qfound[fn] = (da_s, int(vd.get("/Ff") or 0))
+            self.assertIn("Wpn Name", qfound)
+            self.assertIn("Backstory", qfound)
+            self.assertEqual(qfound["Wpn Name"][1] & (1 << 23), 0)
+            self.assertEqual(qfound["Backstory"][1] & (1 << 23), 0)
+            self.assertTrue(bool(qfound["Backstory"][1] & 4096))
+            self.assertLess(float(re.search(r"([0-9]+(?:\.[0-9]+)?)\s+Tf", qfound["Wpn Name"][0]).group(1)), 3.0)
+            self.assertLessEqual(float(re.search(r"([0-9]+(?:\.[0-9]+)?)\s+Tf", qfound["Backstory"][0]).group(1)), 4.5)
+
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                PdfReader = None
+            if PdfReader is not None:
+                pypdf_out = Path(tmp) / "pypdf_5e.pdf"
+                _fill_pdf_form_pypdf(
+                    tpl_5e,
+                    {"Wpn Name": ultra_single, "Backstory": chapters},
+                    set(),
+                    pypdf_out,
+                )
+                self.assertTrue(pypdf_out.is_file())
+                reader = PdfReader(str(pypdf_out))
+                found: dict[str, tuple[str, int]] = {}
+                for page in reader.pages:
+                    for annot_ref in page.get("/Annots") or []:
+                        annot = annot_ref.get_object()
+                        name = str(annot.get("/T") or "")
+                        if name in ("Wpn Name", "Backstory"):
+                            found[name] = (str(annot.get("/DA") or ""), int(annot.get("/Ff") or 0))
+                self.assertEqual(found["Wpn Name"][1] & (1 << 23), 0)
+                self.assertEqual(found["Backstory"][1] & (1 << 23), 0)
+                self.assertTrue(bool(found["Backstory"][1] & 4096))
+                self.assertLess(float(re.search(r"([0-9]+(?:\.[0-9]+)?)\s+Tf", found["Wpn Name"][0]).group(1)), 3.0)
+                self.assertLessEqual(float(re.search(r"([0-9]+(?:\.[0-9]+)?)\s+Tf", found["Backstory"][0]).group(1)), 4.5)
 
 
 if __name__ == "__main__":
