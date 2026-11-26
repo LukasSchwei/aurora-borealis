@@ -138,6 +138,219 @@ def _fmt_mod(val: int) -> str:
     return f"+{val}" if val >= 0 else str(val)
 
 
+def format_proficiency_label(name: str) -> str:
+    """Strip redundant '<Type> Proficiency (...)' wrappers from proficiency labels."""
+    s = (name or "").strip()
+    if not s:
+        return ""
+    m = re.match(r"^(?:[A-Za-z' -]*?\b)?proficiency\s*\((.+)\)$", s, flags=re.IGNORECASE)
+    if m:
+        s = m.group(1).strip()
+    else:
+        m = re.match(r"^(?:[A-Za-z' -]*?\b)?proficiency\s*:\s*(.+)$", s, flags=re.IGNORECASE)
+        if m:
+            s = m.group(1).strip()
+    s = re.sub(r"\s+proficiency$", "", s, flags=re.IGNORECASE).strip()
+    return s
+
+
+def format_proficiencies(proficiencies: list[str]) -> list[str]:
+    """Clean proficiency labels and deduplicate case-insensitively while preserving order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in proficiencies:
+        cleaned = format_proficiency_label(raw)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+    return out
+
+
+# Standard PDF Type1 Helvetica character widths (1/1000 em) for rect-aware AcroForm /DA sizing.
+_HELVETICA_CHAR_WIDTHS: dict[str, int] = {
+    " ": 278, "!": 278, '"': 355, "#": 556, "$": 556, "%": 889, "&": 667, "'": 191,
+    "(": 333, ")": 333, "*": 389, "+": 584, ",": 278, "-": 333, ".": 278, "/": 278,
+    "0": 556, "1": 556, "2": 556, "3": 556, "4": 556, "5": 556, "6": 556, "7": 556,
+    "8": 556, "9": 556, ":": 278, ";": 278, "<": 584, "=": 584, ">": 584, "?": 556,
+    "@": 1015, "A": 667, "B": 667, "C": 722, "D": 722, "E": 667, "F": 611, "G": 778,
+    "H": 722, "I": 278, "J": 500, "K": 667, "L": 556, "M": 833, "N": 722, "O": 778,
+    "P": 667, "Q": 778, "R": 722, "S": 667, "T": 611, "U": 722, "V": 667, "W": 944,
+    "X": 667, "Y": 667, "Z": 611, "[": 278, "\\": 278, "]": 278, "^": 469, "_": 556,
+    "`": 333, "a": 556, "b": 556, "c": 500, "d": 556, "e": 556, "f": 278, "g": 556,
+    "h": 556, "i": 222, "j": 222, "k": 500, "l": 222, "m": 833, "n": 556, "o": 556,
+    "p": 556, "q": 556, "r": 333, "s": 500, "t": 278, "u": 556, "v": 500, "w": 722,
+    "x": 500, "y": 500, "z": 500, "{": 334, "|": 260, "}": 334, "~": 584,
+    "•": 350, "–": 556, "—": 1000, "…": 1000,
+}
+
+
+def _helvetica_text_width(text: str, pt: float) -> float:
+    if not text:
+        return 0.0
+    total = sum(_HELVETICA_CHAR_WIDTHS.get(ch, 556 if ord(ch) < 128 else 650) for ch in text)
+    return (total / 1000.0) * pt * 1.06
+
+
+def _wrap_helvetica_lines(text: str, pt: float, max_w: float) -> tuple[list[str], bool]:
+    lines: list[str] = []
+    word_overflow = False
+    for para in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = para.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        cur = ""
+        for word in stripped.split():
+            if _helvetica_text_width(word, pt) > max_w:
+                word_overflow = True
+            if not cur:
+                cur = word
+            else:
+                cand = f"{cur} {word}"
+                if _helvetica_text_width(cand, pt) <= max_w:
+                    cur = cand
+                else:
+                    lines.append(cur)
+                    cur = word
+        if cur:
+            lines.append(cur)
+    return (lines or [""]), word_overflow
+
+
+def _parse_da(da: str) -> tuple[str, Optional[float], str]:
+    cleaned = (da or "").strip()
+    if cleaned.startswith(("u:", "b:")):
+        cleaned = cleaned[2:].strip()
+    font_tok = "/Helv"
+    font_sz: Optional[float] = None
+    color_ops = "0 g"
+    m = re.search(r"(/\S+)\s+([0-9]+(?:\.[0-9]+)?)\s+Tf(.*)$", cleaned)
+    if m:
+        font_tok = m.group(1)
+        sz = float(m.group(2))
+        font_sz = sz if sz > 0 else None
+        tail = m.group(3).strip()
+        if tail:
+            color_ops = tail
+    return font_tok, font_sz, color_ops
+
+
+def _fmt_pt(pt: float) -> str:
+    s = f"{pt:.2f}".rstrip("0").rstrip(".")
+    return s or "8"
+
+
+def _compute_acroform_da(
+    text: str,
+    rect: Optional[list],
+    is_multiline: bool,
+    base_da: str = "",
+    override_da: Optional[str] = None,
+    default_multiline_pt: float = 8.0,
+    min_pt: float = 1.5,
+) -> str:
+    """Compute a Helvetica /DA string whose font size fits cleanly inside `rect`."""
+    font_tok, ov_sz, color_ops = _parse_da(override_da or "")
+    if not override_da:
+        font_tok, base_sz, color_ops = _parse_da(base_da or "")
+    else:
+        base_sz = ov_sz
+
+    if not rect or len(rect) != 4:
+        sz = base_sz if base_sz is not None else default_multiline_pt
+        return f"{font_tok} {_fmt_pt(sz)} Tf {color_ops}"
+
+    rw = abs(float(rect[2]) - float(rect[0]))
+    rh = abs(float(rect[3]) - float(rect[1]))
+    if rw <= 2.0 or rh <= 2.0:
+        sz = base_sz if base_sz is not None else default_multiline_pt
+        return f"{font_tok} {_fmt_pt(sz)} Tf {color_ops}"
+
+    if override_da and ov_sz is not None:
+        max_pt = ov_sz if is_multiline else min(ov_sz, max(min_pt, rh * 0.80))
+    elif base_sz is not None:
+        max_pt = min(base_sz, default_multiline_pt) if is_multiline else min(base_sz, max(min_pt, rh * 0.72))
+    else:
+        if is_multiline:
+            max_pt = default_multiline_pt
+        else:
+            max_pt = min(14.0, max(6.0, round(rh * 0.65 * 4) / 4))
+
+    max_pt = max(min_pt, round(max_pt * 4) / 4)
+    if not text.strip():
+        return f"{font_tok} {_fmt_pt(max_pt)} Tf {color_ops}"
+
+    if not is_multiline:
+        usable_w = max(4.0, rw - 3.5)
+        usable_h = max(4.0, rh - 1.5)
+        pt = max_pt
+        best_pt = min_pt
+        while pt >= min_pt - 1e-6:
+            best_pt = pt
+            if _helvetica_text_width(text.strip(), pt) <= usable_w and pt * 1.12 <= usable_h:
+                return f"{font_tok} {_fmt_pt(pt)} Tf {color_ops}"
+            pt = round(pt - 0.25, 2)
+        return f"{font_tok} {_fmt_pt(best_pt)} Tf {color_ops}"
+
+    usable_w = max(4.0, rw - 5.0)
+    usable_h = max(4.0, rh - 4.0)
+    pt = max_pt
+    best_pt = min_pt
+    while pt >= min_pt - 1e-6:
+        best_pt = pt
+        lines, word_overflow = _wrap_helvetica_lines(text, pt, usable_w)
+        if not word_overflow and (len(lines) * pt * 1.24) <= usable_h:
+            return f"{font_tok} {_fmt_pt(pt)} Tf {color_ops}"
+        pt = round(pt - 0.25, 2)
+    return f"{font_tok} {_fmt_pt(best_pt)} Tf {color_ops}"
+
+
+def _resolve_qpdf_rect(val_dict: dict, objects: dict) -> Optional[list]:
+    rect = val_dict.get("/Rect")
+    if isinstance(rect, list) and len(rect) == 4:
+        return rect
+    for kid_ref in val_dict.get("/Kids") or []:
+        if isinstance(kid_ref, str):
+            kid_dict = objects.get(f"obj:{kid_ref}", {}).get("value")
+            if isinstance(kid_dict, dict):
+                kr = kid_dict.get("/Rect")
+                if isinstance(kr, list) and len(kr) == 4:
+                    return kr
+    return None
+
+
+def _resolve_qpdf_inherited(val_dict: dict, objects: dict, key: str):
+    cur = val_dict
+    seen: set[int] = set()
+    while isinstance(cur, dict) and id(cur) not in seen:
+        seen.add(id(cur))
+        if key in cur and cur[key] not in (None, "", "u:"):
+            return cur[key]
+        pref = cur.get("/Parent")
+        if not isinstance(pref, str):
+            break
+        cur = objects.get(f"obj:{pref}", {}).get("value")
+    return None
+
+
+def _resolve_pypdf_inherited(annot, key: str):
+    cur = annot
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if key in cur:
+            return cur[key]
+        parent = cur.get("/Parent")
+        if parent is None:
+            break
+        cur = parent.get_object() if hasattr(parent, "get_object") else parent
+    return None
+
+
 def _pypdf_annot_fullname(annot) -> str:
     """Resolve the hierarchical AcroForm fullname of a pypdf annotation widget."""
     parts: list[str] = []
@@ -190,23 +403,31 @@ def _fill_pdf_form_pypdf(
             if fname in text_lookup or fname.strip() in text_stripped:
                 txt = text_lookup.get(fname, text_stripped.get(fname.strip(), ""))
                 annot[NameObject("/V")] = TextStringObject(txt)
-                da_val = da_map.get(fname) or da_map.get(fname.strip())
-                if da_val:
-                    annot[NameObject("/DA")] = TextStringObject(da_val)
-                elif fname.strip() in (
-                    "Features and Traits",
-                    "Feat+Traits",
-                    "Equipment",
-                    "ProficienciesLang",
-                    "Backstory",
-                    "Allies",
-                ):
-                    annot[NameObject("/DA")] = TextStringObject("/Helv 8 Tf 0 g")
                 ff_val = ff_map.get(fname)
                 if ff_val is None:
                     ff_val = ff_map.get(fname.strip())
                 if ff_val is not None:
                     annot[NameObject("/Ff")] = NumberObject(int(ff_val))
+                    eff_ff = int(ff_val)
+                else:
+                    raw_ff = _resolve_pypdf_inherited(annot, "/Ff")
+                    eff_ff = int(raw_ff) if raw_ff is not None else 0
+                is_multiline = bool(eff_ff & 4096)
+
+                da_val = da_map.get(fname) or da_map.get(fname.strip())
+                raw_da = _resolve_pypdf_inherited(annot, "/DA")
+                base_da = str(raw_da) if raw_da is not None else ""
+                raw_rect = annot.get("/Rect")
+                rect = [float(x) for x in raw_rect] if raw_rect and len(raw_rect) == 4 else None
+                fitted_da = _compute_acroform_da(
+                    txt,
+                    rect,
+                    is_multiline=is_multiline,
+                    base_da=base_da,
+                    override_da=da_val,
+                    default_multiline_pt=8.0,
+                )
+                annot[NameObject("/DA")] = TextStringObject(fitted_da)
                 if "/AP" in annot:
                     del annot["/AP"]
             elif fname in checkbox_fields:
@@ -313,23 +534,30 @@ def fill_pdf_form_qpdf(
         if fullname in text_lookup or fullname.strip() in text_stripped:
             txt = text_lookup.get(fullname, text_stripped.get(fullname.strip(), ""))
             val_dict["/V"] = f"u:{txt}"
-            da_val = da_map.get(fullname) or da_map.get(fullname.strip())
-            if da_val:
-                val_dict["/DA"] = da_val if da_val.startswith(("u:", "b:")) else f"u:{da_val}"
-            elif fullname in (
-                "Features and Traits",
-                "Feat+Traits",
-                "Equipment",
-                "ProficienciesLang",
-                "Backstory",
-                "Allies",
-            ):
-                val_dict["/DA"] = "u:/Helv 8 Tf 0 g"
             ff_val = ff_map.get(fullname)
             if ff_val is None:
                 ff_val = ff_map.get(fullname.strip())
             if ff_val is not None:
                 val_dict["/Ff"] = int(ff_val)
+                eff_ff = int(ff_val)
+            else:
+                raw_ff = _resolve_qpdf_inherited(val_dict, objects, "/Ff")
+                eff_ff = int(raw_ff) if isinstance(raw_ff, (int, float)) else 0
+            is_multiline = bool(eff_ff & 4096)
+
+            da_val = da_map.get(fullname) or da_map.get(fullname.strip())
+            raw_da = _resolve_qpdf_inherited(val_dict, objects, "/DA")
+            base_da = str(raw_da) if raw_da is not None else ""
+            rect = _resolve_qpdf_rect(val_dict, objects)
+            fitted_da = _compute_acroform_da(
+                txt,
+                rect,
+                is_multiline=is_multiline,
+                base_da=base_da,
+                override_da=da_val,
+                default_multiline_pt=8.0,
+            )
+            val_dict["/DA"] = fitted_da if fitted_da.startswith(("u:", "b:")) else f"u:{fitted_da}"
             val_dict.pop("/AP", None)
         elif fullname in chk_lookup:
             on_state = "/Yes"
@@ -655,7 +883,7 @@ def _build_5e_field_map(
     wpn_slots = [
         ("Wpn Name", "Wpn1 AtkBonus", "Wpn1 Damage"),
         ("Wpn Name 2", "Wpn2 AtkBonus ", "Wpn2 Damage "),
-        ("Wpn Name 3", "Wpn3 AtkBonus  ", "Wpn3 Damage  "),
+        ("Wpn Name 3", "Wpn3 AtkBonus  ", "Wpn3 Damage "),
     ]
     str_mod = computed.ability_modifiers["strength"]
     dex_mod = computed.ability_modifiers["dexterity"]
@@ -683,8 +911,9 @@ def _build_5e_field_map(
     prof_parts: list[str] = []
     if computed.languages:
         prof_parts.append("Languages: " + ", ".join(computed.languages))
-    if computed.proficiencies:
-        prof_parts.append("Proficiencies: " + ", ".join(computed.proficiencies))
+    clean_profs = format_proficiencies(computed.proficiencies)
+    if clean_profs:
+        prof_parts.append("Proficiencies: " + ", ".join(clean_profs))
     text["ProficienciesLang"] = "\n\n".join(prof_parts)
 
     feat_lines = [
@@ -789,7 +1018,7 @@ def _fit_text_layout(
     if not text:
         return float(size), ""
     font_family = "Arial" if is_windows() else "Sans Serif"
-    usable_w = max(4.0, float(w) - 0.8)
+    usable_w = max(4.0, float(w) - 1.2)
     usable_h = max(4.0, float(h))
     start_pt = max(3.0, float(size))
     floor_pt = min(start_pt, max(3.0, float(min_size)))
@@ -808,7 +1037,7 @@ def _fit_text_layout(
             fm = _metrics(pt)
             tw = max(fm.horizontalAdvance(text), fm.boundingRect(text).width())
             best_pt = pt
-            if tw <= usable_w:
+            if tw <= usable_w and fm.height() <= usable_h + 0.5:
                 return pt, text
             pt = round(pt - 0.25, 2)
         return best_pt, text
@@ -830,18 +1059,33 @@ def _fit_text_layout(
             return pt, "\n".join(lines)
         pt = round(pt - 0.25, 2)
 
-    need_extra_shrink = last_overflow or (usable_h <= 28.0 and last_total_h > usable_h + 0.5)
-    if need_extra_shrink and best_pt > 3.0:
+    if (last_overflow or last_total_h > usable_h + 0.5) and best_pt > 2.5:
         pt = round(best_pt - 0.25, 2)
-        while pt >= 3.0 - 1e-6:
+        while pt >= 2.5 - 1e-6:
             fm = _metrics(pt)
             lines, word_overflow = _wrap_text_no_midword(text, fm, usable_w)
             total_h = max(0, len(lines) - 1) * fm.lineSpacing() + fm.height()
             best_pt = pt
             best_lines = lines
-            if not word_overflow and (usable_h > 28.0 or total_h <= usable_h + 0.5):
+            last_total_h = total_h
+            if not word_overflow and total_h <= usable_h + 0.5:
                 break
             pt = round(pt - 0.25, 2)
+
+    if last_total_h > usable_h + 0.5 and best_lines:
+        fm = _metrics(best_pt)
+        line_step = max(1.0, fm.lineSpacing())
+        max_lines = max(1, int((usable_h + 0.5 - fm.height()) // line_step) + 1)
+        if len(best_lines) > max_lines:
+            kept = list(best_lines[:max_lines])
+            last_line = kept[-1].rstrip()
+            while last_line and fm.horizontalAdvance(last_line + "…") > usable_w:
+                if " " in last_line:
+                    last_line = last_line.rsplit(" ", 1)[0].rstrip()
+                else:
+                    last_line = last_line[:-1]
+            kept[-1] = (last_line + "…") if last_line else "…"
+            best_lines = kept
 
     return best_pt, "\n".join(best_lines)
 
@@ -874,9 +1118,12 @@ def _draw_text(
     font = QFont("Arial" if is_windows() else "Sans Serif")
     font.setPointSizeF(fitted_size)
     font.setBold(bold)
+    painter.save()
+    painter.setClipRect(QRectF(x, y, w, h))
     painter.setFont(font)
     painter.setPen(QColor("#111827"))
     painter.drawText(QRectF(x, y, w, h), int(align), fitted_text)
+    painter.restore()
 
 
 def _get_pdf_page_size(pdf_path: Path) -> tuple[float, float]:
@@ -1042,18 +1289,18 @@ def export_55e_overlay_pdf(
             painter.scale(scale, scale)
 
             # --- PAGE 1 (612 x 792 pt official 2024 sheet coordinates) ---
-            _draw_text(painter, 26.6, 15.0, 221.5, 14.9, state.name or "", size=10.5, bold=True)
-            _draw_text(painter, 25.5, 39.0, 120.0, 13.5, bg_el.name if bg_el else "", size=8.5)
+            _draw_text(painter, 26.6, 18.0, 221.5, 15.0, state.name or "", size=10.5, bold=True)
+            _draw_text(painter, 25.5, 41.6, 120.0, 13.5, bg_el.name if bg_el else "", size=8.5)
             norm_classes = state.normalized_classes()
             cls_55e_txt = (
                 class_display_summary(state, repo)
                 if len(norm_classes) > 1
                 else (class_el.name if class_el else "")
             )
-            _draw_text(painter, 150.6, 39.0, 98.2, 13.5, cls_55e_txt, size=8.5 if len(cls_55e_txt) < 18 else 7.2)
-            _draw_text(painter, 25.0, 60.5, 120.2, 14.1, race_el.name if race_el else "", size=8.5)
+            _draw_text(painter, 150.6, 41.6, 98.2, 13.5, cls_55e_txt, size=8.5 if len(cls_55e_txt) < 18 else 7.2)
+            _draw_text(painter, 25.0, 63.3, 120.2, 13.6, race_el.name if race_el else "", size=8.5)
             archetypes = [e.name for e in computed.granted_elements if e.type == "Archetype"]
-            _draw_text(painter, 150.6, 60.5, 98.7, 14.1, ", ".join(archetypes), size=8.5)
+            _draw_text(painter, 150.6, 63.3, 98.7, 13.6, ", ".join(archetypes), size=8.5)
 
             # Level, XP, AC, HP Current, HP Max, Hit Dice Max
             _draw_text(
@@ -1062,7 +1309,7 @@ def export_55e_overlay_pdf(
             )
             if state.xp > 0:
                 _draw_text(
-                    painter, 261.3, 56.5, 37.5, 13.7, str(state.xp), size=7.8, bold=True,
+                    painter, 261.3, 57.6, 37.5, 13.7, str(state.xp), size=7.8, bold=True,
                     align=Qt.AlignmentFlag.AlignCenter,
                 )
             _draw_text(
@@ -1070,39 +1317,39 @@ def export_55e_overlay_pdf(
                 align=Qt.AlignmentFlag.AlignCenter,
             )
             _draw_text(
-                painter, 384.0, 47.0, 48.8, 26.8, str(computed.max_hp), size=13, bold=True,
+                painter, 384.0, 49.0, 48.8, 25.5, str(computed.max_hp), size=13, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
             _draw_text(
-                painter, 444.9, 59.5, 43.3, 13.9, str(computed.max_hp), size=8.5, bold=True,
+                painter, 444.9, 61.4, 43.3, 13.6, str(computed.max_hp), size=8.5, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
             hd_55e_txt = computed.hit_dice_summary or f"{state.level}{computed.hit_die}"
             _draw_text(
-                painter, 499.8, 59.5, 37.8, 14.1, hd_55e_txt, size=8.5 if len(hd_55e_txt) <= 6 else 7.0, bold=True,
+                painter, 499.8, 61.4, 37.8, 13.6, hd_55e_txt, size=8.5 if len(hd_55e_txt) <= 6 else 7.0, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
 
             # Proficiency Bonus, Initiative, Speed, Size, Passive Perception
             _draw_text(
-                painter, 43.0, 147.0, 31.6, 22.3, _fmt_mod(computed.proficiency_bonus), size=12, bold=True,
+                painter, 43.0, 145.3, 31.6, 22.3, _fmt_mod(computed.proficiency_bonus), size=12, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
             _draw_text(
-                painter, 245.1, 131.5, 42.6, 22.3, _fmt_mod(computed.initiative), size=11.5, bold=True,
+                painter, 245.1, 134.0, 42.6, 22.3, _fmt_mod(computed.initiative), size=11.5, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
             _draw_text(
-                painter, 338.1, 131.5, 48.4, 22.3, f"{computed.speed} ft", size=10.5, bold=True,
+                painter, 338.1, 134.0, 48.4, 22.3, f"{computed.speed} ft", size=10.5, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
             size_els = [e.name for e in computed.granted_elements if e.type == "Size"]
             _draw_text(
-                painter, 436.7, 131.5, 42.8, 22.3, size_els[0] if size_els else "Medium", size=9.0, bold=True,
+                painter, 436.7, 134.0, 42.8, 22.3, size_els[0] if size_els else "Medium", size=9.0, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
             _draw_text(
-                painter, 528.8, 131.5, 53.0, 22.3, str(computed.passive_perception), size=11.5, bold=True,
+                painter, 528.8, 134.0, 53.0, 22.3, str(computed.passive_perception), size=11.5, bold=True,
                 align=Qt.AlignmentFlag.AlignCenter,
             )
 
@@ -1189,7 +1436,7 @@ def export_55e_overlay_pdf(
                 if sv.proficient:
                     _draw_center_dot(painter, sv_cx, sv_cy, diameter=4.6)
                 _draw_text(
-                    painter, val_x, sv_val_y + 1.5, 17.4, 13.0, _fmt_mod(sv.bonus),
+                    painter, val_x, sv_cy - 6.2, 17.4, 13.0, _fmt_mod(sv.bonus),
                     size=8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter,
                 )
 
@@ -1198,7 +1445,7 @@ def export_55e_overlay_pdf(
                     if sk.proficient:
                         _draw_center_dot(painter, sk_cx, sk_cy, diameter=4.6)
                     _draw_text(
-                        painter, val_x, sk_val_y + 1.5, 17.4, 13.0, _fmt_mod(sk.bonus),
+                        painter, val_x, sk_cy - 6.2, 17.4, 13.0, _fmt_mod(sk.bonus),
                         size=8.0, align=Qt.AlignmentFlag.AlignCenter,
                     )
 
@@ -1219,11 +1466,8 @@ def export_55e_overlay_pdf(
                 if any(kw in profs_lower for kw in kws):
                     _draw_center_dot(painter, cx, cy, diameter=4.4)
 
-            clean_profs = [
-                p.replace("Weapon Proficiency (", "").replace("Armor Proficiency (", "").rstrip(")")
-                for p in computed.proficiencies
-            ]
-            prof_txt = ", ".join(clean_profs[:12])
+            clean_profs = format_proficiencies(computed.proficiencies)
+            prof_txt = ", ".join(clean_profs)
             _draw_text(
                 painter, 17.8, 682.2, 191.1, 50.2, prof_txt, size=7.2, wrap=True,
                 align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
@@ -1235,7 +1479,7 @@ def export_55e_overlay_pdf(
             str_mod = computed.ability_modifiers["strength"]
             dex_mod = computed.ability_modifiers["dexterity"]
             for idx, wpn in enumerate(weapons):
-                wy = 202.0 + idx * 19.65
+                wy = 204.0 + idx * 19.73
                 el = repo.get(wpn.element_id)
                 dmg = el.setters.get("damage", "") if el else ""
                 is_ranged = el and (
@@ -1245,14 +1489,14 @@ def export_55e_overlay_pdf(
                 atk_mod = max(str_mod, dex_mod) if is_ranged else str_mod
                 m_prop = get_weapon_mastery(wpn.name) if wpn.name.lower() in mastered_set else None
                 wpn_label = f"{wpn.name} [{m_prop}]" if m_prop else wpn.name
-                _draw_text(painter, 231.5, wy, 105.6, 16.8, wpn_label, size=7.8 if m_prop else 8.0)
+                _draw_text(painter, 231.5, wy, 105.6, 15.0, wpn_label, size=7.8 if m_prop else 8.0)
                 _draw_text(
-                    painter, 341.5, wy, 43.8, 16.8,
+                    painter, 341.5, wy, 43.8, 15.0,
                     _fmt_mod(atk_mod + computed.proficiency_bonus + wpn.magic_bonus),
                     size=8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter,
                 )
                 dmg_txt = f"{dmg} +{wpn.magic_bonus}" if (dmg and wpn.magic_bonus > 0) else dmg
-                _draw_text(painter, 390.0, wy, 74.6, 16.8, dmg_txt, size=7.8)
+                _draw_text(painter, 390.0, wy, 74.6, 15.0, dmg_txt, size=7.8)
 
             # Class Features (2 columns), Species Traits, Feats (plus 5.5e notes & animal forms)
             cls_feat_list = [
@@ -1268,7 +1512,11 @@ def export_55e_overlay_pdf(
                     for fid in state.animal_forms[:6]
                 ]
                 cls_feat_list.append(f"• Wild Shape Forms: {', '.join(af_names)}")
-            split_idx = max(14, (len(cls_feat_list) + 1) // 2) if len(cls_feat_list) > 14 else len(cls_feat_list)
+            total_chars = sum(len(s) for s in cls_feat_list)
+            if len(cls_feat_list) > 1 and (len(cls_feat_list) > 12 or total_chars > 360):
+                split_idx = (len(cls_feat_list) + 1) // 2
+            else:
+                split_idx = len(cls_feat_list)
             cls_col1 = "\n".join(cls_feat_list[:split_idx])
             cls_col2 = "\n".join(cls_feat_list[split_idx:])
             spc_feats = "\n".join(
@@ -1304,9 +1552,9 @@ def export_55e_overlay_pdf(
                         _fmt_mod(sc.attack_bonus),
                     )
                 _draw_text(painter, 24.9, 18.84, 110.2, 18.0, ab_hdr, size=9.5 if len(ab_hdr) <= 14 else 7.8, bold=True, align=Qt.AlignmentFlag.AlignCenter)
-                _draw_text(painter, 14.0, 49.7, 33.7, 26.5, mod_hdr, size=11 if len(mod_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
-                _draw_text(painter, 13.2, 78.6, 34.6, 25.7, dc_hdr, size=11 if len(dc_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
-                _draw_text(painter, 13.3, 107.2, 34.3, 25.3, atk_hdr, size=11 if len(atk_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                _draw_text(painter, 14.0, 49.0, 33.7, 26.5, mod_hdr, size=11 if len(mod_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                _draw_text(painter, 13.2, 77.7, 34.6, 25.7, dc_hdr, size=11 if len(dc_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
+                _draw_text(painter, 13.3, 106.2, 34.3, 25.3, atk_hdr, size=11 if len(atk_hdr) <= 4 else 8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter)
 
                 slot_coords = {
                     1: (184.3, 88.8), 2: (184.3, 103.2), 3: (184.3, 117.3),
@@ -1329,7 +1577,7 @@ def export_55e_overlay_pdf(
                 lvl = sel.setters.get("level", "0") if sel else "0"
                 ctime = sel.setters.get("time", "") if sel else ""
                 srange = sel.setters.get("range", "") if sel else ""
-                sy = 182.5 + idx * 19.72
+                sy = 183.0 + idx * 19.73
                 _draw_text(painter, 17.8, sy, 20.4, 16.5, lvl, size=8.0, align=Qt.AlignmentFlag.AlignCenter)
                 _draw_text(painter, 42.9, sy, 109.4, 16.5, sname, size=8.0, wrap=True, min_size=4.8)
                 if ctime:

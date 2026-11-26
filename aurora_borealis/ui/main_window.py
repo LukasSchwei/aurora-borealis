@@ -142,6 +142,8 @@ from .ui_helpers import (
     fit_button,
     install_global_wheel_filter,
     refit_buttons,
+    refresh_spinbox_margins,
+    set_global_ui_scale,
 )
 
 POINT_BUY_COSTS = {8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9}
@@ -887,12 +889,14 @@ class MainWindow(QMainWindow):
                 save_config(self.config, self.config_path)
             return
         self._applied_scale = clamped
+        set_global_ui_scale(QApplication.instance(), clamped)
         self.setUpdatesEnabled(False)
         try:
             self.setStyleSheet(get_stylesheet(self.config.theme, clamped))
             if hasattr(self, "title_bar"):
                 self.title_bar.set_scale_value(clamped)
             self._rescale_fixed_widgets(clamped)
+            refresh_spinbox_margins(self, clamped)
             if hasattr(self, "select_view") and hasattr(self.select_view, "set_ui_scale"):
                 if self.screen_stack.currentWidget() is self.select_view:
                     self.select_view.set_ui_scale(clamped)

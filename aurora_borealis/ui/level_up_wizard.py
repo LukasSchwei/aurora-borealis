@@ -317,6 +317,7 @@ class LevelUpWizardDialog(QDialog):
         asbl.addLayout(split_row)
 
         combo_row = QHBoxLayout()
+        self.lbl_asi_a = QLabel("Ability (+2):")
         self.cmb_asi_a = QComboBox()
         self.cmb_asi_b = QComboBox()
         for ab in ABILITIES:
@@ -325,11 +326,18 @@ class LevelUpWizardDialog(QDialog):
         self.cmb_asi_b.setCurrentIndex(2)
         self.cmb_asi_a.currentIndexChanged.connect(self._on_asi_controls_changed)
         self.cmb_asi_b.currentIndexChanged.connect(self._on_asi_controls_changed)
-        combo_row.addWidget(QLabel("Primary (+2 / +1):"))
+
+        self.asi_secondary_wrap = QWidget()
+        sec_l = QHBoxLayout(self.asi_secondary_wrap)
+        sec_l.setContentsMargins(12, 0, 0, 0)
+        sec_l.setSpacing(6)
+        self.lbl_asi_b = QLabel("Secondary (+1):")
+        sec_l.addWidget(self.lbl_asi_b)
+        sec_l.addWidget(self.cmb_asi_b)
+
+        combo_row.addWidget(self.lbl_asi_a)
         combo_row.addWidget(self.cmb_asi_a)
-        combo_row.addSpacing(12)
-        combo_row.addWidget(QLabel("Secondary (+1):"))
-        combo_row.addWidget(self.cmb_asi_b)
+        combo_row.addWidget(self.asi_secondary_wrap)
         combo_row.addStretch()
         asbl.addLayout(combo_row)
 
@@ -803,7 +811,12 @@ class LevelUpWizardDialog(QDialog):
         is_asi = self.rad_asi.isChecked()
         self.asi_scores_box.setVisible(is_asi)
         self.asi_feat_box.setVisible(not is_asi)
-        self.cmb_asi_b.setEnabled(self.rad_asi_11.isChecked())
+        is_split_11 = self.rad_asi_11.isChecked()
+        self.lbl_asi_a.setText("Primary (+1):" if is_split_11 else "Ability (+2):")
+        self.asi_secondary_wrap.setVisible(is_split_11)
+        self.lbl_asi_b.setVisible(is_split_11)
+        self.cmb_asi_b.setVisible(is_split_11)
+        self.cmb_asi_b.setEnabled(is_split_11)
 
         if is_asi:
             ab_a = self.cmb_asi_a.currentData() or "strength"
@@ -811,6 +824,8 @@ class LevelUpWizardDialog(QDialog):
             if self.rad_asi_2.isChecked():
                 delta_txt = f"{ABILITY_ABBR[ab_a]} {self._before_comp.ability_totals[ab_a]} → {self._draft_comp.ability_totals[ab_a]}"
             else:
+                if ab_b == ab_a:
+                    ab_b = next(a for a in ABILITIES if a != ab_a)
                 delta_txt = (
                     f"{ABILITY_ABBR[ab_a]} {self._before_comp.ability_totals[ab_a]} → {self._draft_comp.ability_totals[ab_a]}  •  "
                     f"{ABILITY_ABBR[ab_b]} {self._before_comp.ability_totals[ab_b]} → {self._draft_comp.ability_totals[ab_b]}"

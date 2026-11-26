@@ -25,6 +25,13 @@ class _NoWheelScrollFilter(QObject):
     """Prevent hovered QComboBox / QAbstractSpinBox widgets from stealing scroll-wheel events."""
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() in (QEvent.Type.Polish, QEvent.Type.Show, QEvent.Type.StyleChange):
+            if isinstance(obj, QAbstractSpinBox):
+                app = QApplication.instance()
+                scale = float(app.property("_aurora_ui_scale") or 1.0) if app is not None else 1.0
+                configure_spinbox_margins(obj, scale)
+            return False
+
         if event.type() != QEvent.Type.Wheel or not isinstance(event, QWheelEvent):
             return False
 
@@ -155,16 +162,51 @@ def fit_button(btn: QPushButton) -> None:
     btn.setMinimumWidth(btn.sizeHint().width())
 
 
+def set_global_ui_scale(app: Optional[QApplication], scale: float) -> None:
+    """Persist the active UI scale factor on the QApplication for global widget helpers."""
+    if app is not None:
+        app.setProperty("_aurora_ui_scale", float(scale))
+
+
+def configure_spinbox_margins(spin: QAbstractSpinBox, scale: float = 1.0) -> None:
+    """Give left-aligned spinboxes the same left text padding as QLineEdit while preserving centered steppers."""
+    le = spin.lineEdit()
+    if le is None:
+        return
+    is_centered_or_right = spin.objectName() == "StepperSpin" or bool(
+        spin.alignment() & (Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignRight)
+    )
+    if is_centered_or_right:
+        le.setTextMargins(0, 0, 0, 0)
+        return
+    s = max(0.8, min(1.2, float(scale)))
+    left_px = max(8, round(11 * s))
+    le.setTextMargins(left_px, 0, 2, 0)
+
+
+def refresh_spinbox_margins(root: QWidget, scale: float = 1.0) -> None:
+    """Update text margins on all QAbstractSpinBox descendants."""
+    for spn in root.findChildren(QAbstractSpinBox):
+        configure_spinbox_margins(spn, scale)
+
+
 def refit_buttons(root: QWidget) -> None:
-    """Lightweight button width refresh used during zoom stage changes."""
+    """Lightweight button width and spinbox margin refresh used during zoom stage changes."""
     for btn in root.findChildren(QPushButton):
         fit_button(btn)
+    app = QApplication.instance()
+    scale = float(app.property("_aurora_ui_scale") or 1.0) if app is not None else 1.0
+    refresh_spinbox_margins(root, scale)
 
 
 def ensure_widgets_fit(root: QWidget) -> None:
     """Size buttons, combos, tabs, and tables to fit their labels without '...' truncation."""
     for btn in root.findChildren(QPushButton):
         fit_button(btn)
+
+    app = QApplication.instance()
+    scale = float(app.property("_aurora_ui_scale") or 1.0) if app is not None else 1.0
+    refresh_spinbox_margins(root, scale)
 
     for cmb in root.findChildren(QComboBox):
         mv = cmb.maxVisibleItems()

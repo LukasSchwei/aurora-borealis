@@ -1100,15 +1100,7 @@ def _build_companion_field_map(
     for _sk, _chk, txt_f in _COMPANION_SKILL_FIELDS:
         single_line_da[txt_f] = "/Helv 7.5 Tf 0 g"
     for name_f, atk_f, dmg_f in _COMPANION_ACTION_ROWS:
-        act_name = text.get(name_f, "")
-        if len(act_name) > 22:
-            single_line_da[name_f] = "/Helv 4.6 Tf 0 g"
-        elif len(act_name) > 17:
-            single_line_da[name_f] = "/Helv 5.1 Tf 0 g"
-        elif len(act_name) > 13:
-            single_line_da[name_f] = "/Helv 6.0 Tf 0 g"
-        else:
-            single_line_da[name_f] = "/Helv 7.5 Tf 0 g"
+        single_line_da[name_f] = "/Helv 7.5 Tf 0 g"
         single_line_da[atk_f] = "/Helv 7.5 Tf 0 g"
         single_line_da[dmg_f] = "/Helv 7.5 Tf 0 g"
 
