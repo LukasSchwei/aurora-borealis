@@ -284,6 +284,96 @@ def _convert_feats(data: dict) -> list[etree._Element]:
     return out
 
 
+_DAMAGE_TYPE_MAP = {
+    "A": "Acid",
+    "B": "Bludgeoning",
+    "C": "Cold",
+    "F": "Fire",
+    "O": "Force",
+    "L": "Lightning",
+    "N": "Necrotic",
+    "P": "Piercing",
+    "I": "Poison",
+    "Y": "Psychic",
+    "R": "Radiant",
+    "S": "Slashing",
+    "T": "Thunder",
+}
+
+_WEAPON_PROPERTY_MAP = {
+    "A": "Ammunition",
+    "F": "Finesse",
+    "H": "Heavy",
+    "L": "Light",
+    "LD": "Loading",
+    "R": "Reach",
+    "S": "Special",
+    "T": "Thrown",
+    "2H": "Two-Handed",
+    "V": "Versatile",
+}
+
+
+def _format_5etools_time(time_list: Any) -> str:
+    if not isinstance(time_list, list) or not time_list:
+        return ""
+    t0 = time_list[0]
+    if not isinstance(t0, dict):
+        return ""
+    num = t0.get("number", 1)
+    unit = str(t0.get("unit") or "").strip()
+    if not unit:
+        return ""
+    return f"{num} {unit}"
+
+
+def _format_5etools_range(range_obj: Any) -> str:
+    if not isinstance(range_obj, dict):
+        return ""
+    rtype = str(range_obj.get("type") or "").strip()
+    dist = range_obj.get("distance") or {}
+    if isinstance(dist, dict):
+        dtype = str(dist.get("type") or "").strip()
+        amt = dist.get("amount")
+        if dtype == "self":
+            return "Self"
+        if dtype == "touch":
+            return "Touch"
+        if dtype == "sight":
+            return "Sight"
+        if dtype == "unlimited":
+            return "Unlimited"
+        if amt is not None and dtype:
+            base = f"{amt} {dtype}"
+            if rtype and rtype != "point":
+                return f"Self ({base} {rtype})"
+            return base
+    return rtype.capitalize() if rtype else ""
+
+
+def _format_5etools_duration(dur_list: Any) -> tuple[str, bool]:
+    if not isinstance(dur_list, list) or not dur_list:
+        return "", False
+    d0 = dur_list[0]
+    if not isinstance(d0, dict):
+        return "", False
+    is_conc = bool(d0.get("concentration"))
+    dtype = str(d0.get("type") or "").strip()
+    if dtype == "instant":
+        return "Instantaneous", is_conc
+    if dtype == "permanent":
+        return "Until dispelled", is_conc
+    if dtype == "special":
+        return "Special", is_conc
+    dur = d0.get("duration") or {}
+    if isinstance(dur, dict):
+        amt = dur.get("amount", 1)
+        unit = str(dur.get("type") or "").strip()
+        txt = f"{amt} {unit}" if unit else dtype
+        return (f"Concentration, up to {txt}" if is_conc else txt), is_conc
+    return dtype.capitalize(), is_conc
+
+
 def _convert_spells(data: dict) -> list[etree._Element]:
     out: list[etree._Element] = []
     for sp in data.get("spell", []):
@@ -306,13 +396,49 @@ def _convert_spells(data: dict) -> list[etree._Element]:
                         if cname and cname.lower() not in seen_cls:
                             seen_cls.add(cname.lower())
                             class_tags.append(cname)
-        if class_tags:
-            etree.SubElement(el, "supports").text = ", ".join(class_tags)
+        meta = sp.get("meta") if isinstance(sp.get("meta"), dict) else {}
+        is_ritual = bool(meta.get("ritual"))
+        dur_txt, is_conc = _format_5etools_duration(sp.get("duration"))
+        sup_tokens = list(class_tags)
+        if is_ritual:
+            sup_tokens.append("Ritual")
+        if is_conc:
+            sup_tokens.append("Concentration")
+        if sup_tokens:
+            etree.SubElement(el, "supports").text = ", ".join(dict.fromkeys(sup_tokens))
+
         setters = etree.SubElement(el, "setters")
         etree.SubElement(setters, "set", name="level").text = str(sp.get("level", 0))
         school = _SPELL_SCHOOL_MAP.get(str(sp.get("school", "")).upper(), str(sp.get("school", "")))
         if school:
             etree.SubElement(setters, "set", name="school").text = school
+        time_txt = _format_5etools_time(sp.get("time"))
+        if time_txt:
+            etree.SubElement(setters, "set", name="time").text = time_txt
+        range_txt = _format_5etools_range(sp.get("range"))
+        if range_txt:
+            etree.SubElement(setters, "set", name="range").text = range_txt
+        if dur_txt:
+            etree.SubElement(setters, "set", name="duration").text = dur_txt
+        etree.SubElement(setters, "set", name="isRitual").text = "true" if is_ritual else "false"
+        etree.SubElement(setters, "set", name="isConcentration").text = "true" if is_conc else "false"
+
+        comp_obj = sp.get("components")
+        if isinstance(comp_obj, dict):
+            has_v = bool(comp_obj.get("v"))
+            has_s = bool(comp_obj.get("s"))
+            m_raw = comp_obj.get("m")
+            has_m = bool(m_raw)
+            comp_letters = [ch for flag, ch in ((has_v, "V"), (has_s, "S"), (has_m, "M")) if flag]
+            if comp_letters:
+                etree.SubElement(setters, "set", name="components").text = ", ".join(comp_letters)
+            etree.SubElement(setters, "set", name="hasVerbalComponent").text = "true" if has_v else "false"
+            etree.SubElement(setters, "set", name="hasSomaticComponent").text = "true" if has_s else "false"
+            etree.SubElement(setters, "set", name="hasMaterialComponent").text = "true" if has_m else "false"
+            if isinstance(m_raw, str) and m_raw.strip():
+                etree.SubElement(setters, "set", name="materialComponent").text = m_raw.strip()
+            elif isinstance(m_raw, dict) and m_raw.get("text"):
+                etree.SubElement(setters, "set", name="materialComponent").text = str(m_raw["text"]).strip()
         out.append(el)
     return out
 
@@ -359,13 +485,38 @@ def _convert_items(data: dict) -> list[etree._Element]:
         }
         if item_type in type_support_map:
             sup_tokens.append(type_support_map[item_type])
+        prop_names: list[str] = []
+        for pcode in it.get("property", []) or []:
+            pname = _WEAPON_PROPERTY_MAP.get(str(pcode).split("|")[0].upper())
+            if pname:
+                prop_names.append(pname)
+                sup_tokens.append(pname)
         if sup_tokens:
             etree.SubElement(el, "supports").text = ", ".join(dict.fromkeys(sup_tokens))
+
         setters = etree.SubElement(el, "setters")
         if item_type in type_support_map:
             etree.SubElement(setters, "set", name="category").text = type_support_map[item_type]
         if rarity not in ("none", "", "unknown"):
             etree.SubElement(setters, "set", name="rarity").text = rarity.title()
+        if prop_names:
+            etree.SubElement(setters, "set", name="properties").text = ", ".join(dict.fromkeys(prop_names))
+        if it.get("reqAttune"):
+            etree.SubElement(setters, "set", name="attunement").text = "true"
+        if it.get("value") is not None:
+            try:
+                cp_val = int(it["value"])
+                if cp_val >= 100 and cp_val % 100 == 0:
+                    c_node = etree.SubElement(setters, "set", name="cost", currency="gp")
+                    c_node.text = str(cp_val // 100)
+                elif cp_val >= 10 and cp_val % 10 == 0:
+                    c_node = etree.SubElement(setters, "set", name="cost", currency="sp")
+                    c_node.text = str(cp_val // 10)
+                else:
+                    c_node = etree.SubElement(setters, "set", name="cost", currency="cp")
+                    c_node.text = str(cp_val)
+            except (TypeError, ValueError):
+                pass
         if it.get("weight") is not None:
             w = etree.SubElement(setters, "set", name="weight", lb=str(it["weight"]))
             w.text = f"{it['weight']} lb."
@@ -380,13 +531,55 @@ def _convert_items(data: dict) -> list[etree._Element]:
             elif item_type == "S":
                 etree.SubElement(setters, "set", name="armor").text = "Shield"
         if it.get("dmg1"):
-            etree.SubElement(setters, "set", name="damage").text = str(it["dmg1"])
+            dmg_type = _DAMAGE_TYPE_MAP.get(str(it.get("dmgType") or "").upper(), "")
+            d_attrs = {"name": "damage"}
+            if dmg_type:
+                d_attrs["type"] = dmg_type
+            d_node = etree.SubElement(setters, "set", **d_attrs)
+            d_node.text = str(it["dmg1"])
+        if it.get("dmg2"):
+            etree.SubElement(setters, "set", name="versatile").text = str(it["dmg2"])
+        if it.get("range"):
+            etree.SubElement(setters, "set", name="range").text = str(it["range"])
         out.append(el)
     return out
 
 
 def _convert_classes(data: dict) -> list[etree._Element]:
     out: list[etree._Element] = []
+    class_features_by_key: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    for cf in data.get("classFeature", []):
+        if not isinstance(cf, dict):
+            continue
+        cf_name = (cf.get("name") or "").strip()
+        cf_src = (cf.get("source") or "").strip()
+        cls_name = (cf.get("className") or "").strip()
+        lvl = int(cf.get("level") or 1)
+        if not cf_name or not cls_name or not is_official_5etools_source(cf_src, cf):
+            continue
+        cf_id = f"ID_5ETOOLS_CF_{_slug(cf_src)}_{_slug(cls_name)}_{lvl}_{_slug(cf_name)}"
+        cf_el = _new_element(cf_name, "Class Feature", f"5e.tools ({cf_src})", cf_id)
+        _set_description(cf_el, render_5etools_entries(cf.get("entries", [])))
+        out.append(cf_el)
+        class_features_by_key.setdefault((cls_name.lower(), cf_src.lower()), []).append((lvl, cf_id, cf_name))
+
+    sub_features_by_key: dict[tuple[str, str, str], list[tuple[int, str]]] = {}
+    for sf in data.get("subclassFeature", []):
+        if not isinstance(sf, dict):
+            continue
+        sf_name = (sf.get("name") or "").strip()
+        sf_src = (sf.get("source") or "").strip()
+        cls_name = (sf.get("className") or "").strip()
+        sc_short = (sf.get("subclassShortName") or "").strip()
+        lvl = int(sf.get("level") or 3)
+        if not sf_name or not cls_name or not sc_short or not is_official_5etools_source(sf_src, sf):
+            continue
+        sf_id = f"ID_5ETOOLS_AF_{_slug(sf_src)}_{_slug(cls_name)}_{_slug(sc_short)}_{lvl}_{_slug(sf_name)}"
+        sf_el = _new_element(sf_name, "Archetype Feature", f"5e.tools ({sf_src})", sf_id)
+        _set_description(sf_el, render_5etools_entries(sf.get("entries", [])))
+        out.append(sf_el)
+        sub_features_by_key.setdefault((cls_name.lower(), sc_short.lower(), sf_src.lower()), []).append((lvl, sf_id))
+
     for cls in data.get("class", []):
         name = (cls.get("name") or "").strip()
         src = (cls.get("source") or "").strip()
@@ -409,6 +602,40 @@ def _convert_classes(data: dict) -> list[etree._Element]:
                     type="Proficiency",
                     id=f"ID_PROFICIENCY_SAVINGTHROW_{full_ab.upper()}",
                 )
+        sp_profs = cls.get("startingProficiencies") or {}
+        if isinstance(sp_profs, dict):
+            for armor_raw in sp_profs.get("armor", []) or []:
+                al = str(armor_raw).lower()
+                for ak, pid in (
+                    ("light", "ID_PROFICIENCY_ARMOR_PROFICIENCY_LIGHT_ARMOR"),
+                    ("medium", "ID_PROFICIENCY_ARMOR_PROFICIENCY_MEDIUM_ARMOR"),
+                    ("heavy", "ID_PROFICIENCY_ARMOR_PROFICIENCY_HEAVY_ARMOR"),
+                    ("shield", "ID_PROFICIENCY_ARMOR_PROFICIENCY_SHIELDS"),
+                ):
+                    if ak in al:
+                        etree.SubElement(rules, "grant", type="Proficiency", id=pid)
+            for wpn_raw in sp_profs.get("weapons", []) or []:
+                wl = str(wpn_raw).lower()
+                if "simple" in wl:
+                    etree.SubElement(rules, "grant", type="Proficiency", id="ID_PROFICIENCY_WEAPON_PROFICIENCY_SIMPLE_WEAPONS")
+                if "martial" in wl:
+                    etree.SubElement(rules, "grant", type="Proficiency", id="ID_PROFICIENCY_WEAPON_PROFICIENCY_MARTIAL_WEAPONS")
+            for sk_entry in sp_profs.get("skills", []) or []:
+                if isinstance(sk_entry, dict) and isinstance(sk_entry.get("choose"), dict):
+                    ch = sk_entry["choose"]
+                    cnt = int(ch.get("count") or 2)
+                    from_sk = [str(s) for s in (ch.get("from") or []) if s]
+                    sup = " || ".join(from_sk) if from_sk else "Skill"
+                    etree.SubElement(rules, "select", type="Proficiency", name=f"{name} Skill", supports=sup, number=str(cnt))
+
+        sc_title = str(cls.get("subclassTitle") or f"{name} Subclass").strip()
+        sc_level = 3 if src.upper().startswith("X") else 1
+        for lvl, cf_id, cf_name in sorted(class_features_by_key.get((name.lower(), src.lower()), [])):
+            etree.SubElement(rules, "grant", type="Class Feature", id=cf_id, level=str(lvl))
+            if sc_title.lower() in cf_name.lower():
+                sc_level = lvl
+        etree.SubElement(rules, "select", type="Archetype", name=sc_title, supports=name, level=str(sc_level))
+
         if cls.get("spellcastingAbility"):
             ab_full = _ABILITY_FULL.get(str(cls["spellcastingAbility"]).lower(), "Intelligence").capitalize()
             sc = etree.SubElement(el, "spellcasting", name=name, ability=ab_full)
@@ -419,11 +646,17 @@ def _convert_classes(data: dict) -> list[etree._Element]:
         name = (sc.get("name") or "").strip()
         src = (sc.get("source") or "").strip()
         cls_name = (sc.get("className") or "").strip()
+        sc_short = (sc.get("shortName") or name).strip()
         if not name or not is_official_5etools_source(src, sc):
             continue
         eid = f"ID_5ETOOLS_ARCH_{_slug(src)}_{_slug(cls_name)}_{_slug(name)}"
         el = _new_element(name, "Archetype", f"5e.tools ({src})", eid)
+        if cls_name:
+            etree.SubElement(el, "supports").text = cls_name
         _set_description(el, render_5etools_entries(sc.get("entries", [])))
+        s_rules = etree.SubElement(el, "rules")
+        for lvl, sf_id in sorted(sub_features_by_key.get((cls_name.lower(), sc_short.lower(), src.lower()), [])):
+            etree.SubElement(s_rules, "grant", type="Archetype Feature", id=sf_id, level=str(lvl))
         out.append(el)
     return out
 

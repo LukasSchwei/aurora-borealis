@@ -94,13 +94,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         const="",
         default=None,
         metavar="FILE",
-        help="Open a .dnd5e / .dnd55e / .dndcomp file on startup",
+        help="Open a .dnd5e / .dnd55e / .dndcomp / .aurorapack file on startup",
     )
     parser.add_argument(
         "file",
         nargs="?",
         default=None,
-        help="Optional .dnd5e / .dnd55e / .dndcomp file to open on startup",
+        help="Optional .dnd5e / .dnd55e / .dndcomp / .aurorapack file to open on startup",
     )
     parser.add_argument(
         "--data-dir",

@@ -176,6 +176,7 @@ class ContentRepository:
         self.loaded_dirs: list[Path] = []
         self.file_count: int = 0
         self.duplicates: list[DuplicateEntry] = []
+        self.source_files: dict[str, Path] = {}
         self._by_type_name: dict[tuple[str, str], Element] = {}
         self._type_by_id: dict[str, dict[str, Element]] = defaultdict(dict)
         self._search_blobs: dict[str, str] = {}
@@ -189,6 +190,7 @@ class ContentRepository:
         self.loaded_dirs.clear()
         self.file_count = 0
         self.duplicates.clear()
+        self.source_files.clear()
         self._by_type_name.clear()
         self._type_by_id.clear()
         self._search_blobs.clear()
@@ -299,6 +301,7 @@ class ContentRepository:
                     )
                     self._type_by_id[old.type].pop(old.id, None)
                     self.by_id[el.id] = el
+                    self.source_files[el.id] = path
                     self._index_element_metadata(el)
                     self._register_in_type_list(el, path)
                 else:
@@ -317,6 +320,7 @@ class ContentRepository:
                 continue
 
             self.by_id[el.id] = el
+            self.source_files[el.id] = path
             self._index_element_metadata(el)
             self._register_in_type_list(el, path)
             added += 1
@@ -445,6 +449,10 @@ class ContentRepository:
                             level=_parse_int(r.get("level"), 1),
                             requirements=(r.get("requirements") or "").strip(),
                             equipped=(r.get("equipped") or "").strip(),
+                            inline=(r.get("inline") or "").strip().lower() == "true",
+                            maximum=(r.get("maximum") or "").strip(),
+                            minimum=(r.get("minimum") or "").strip(),
+                            alt=(r.get("alt") or "").strip(),
                         )
                     )
         return grant_rules, select_rules, stat_rules
@@ -464,9 +472,27 @@ class ContentRepository:
 
         sheet_node = node.find("sheet")
         sheet_desc = ""
+        sheet_action = ""
+        sheet_usage = ""
+        sheet_alt = ""
+        sheet_descriptions: list[tuple[int, str]] = []
         if sheet_node is not None:
-            desc_child = sheet_node.find("description")
-            sheet_desc = _inner_html(desc_child) if desc_child is not None else _inner_html(sheet_node)
+            sheet_action = (sheet_node.get("action") or "").strip()
+            sheet_usage = (sheet_node.get("usage") or "").strip()
+            sheet_alt = (sheet_node.get("alt") or "").strip()
+            desc_children = sheet_node.findall("description")
+            if desc_children:
+                for dnode in desc_children:
+                    dlvl = _parse_int(dnode.get("level"), 1)
+                    dhtml = _inner_html(dnode)
+                    if dhtml:
+                        sheet_descriptions.append((dlvl, dhtml))
+                sheet_descriptions.sort(key=lambda pair: pair[0])
+                sheet_desc = sheet_descriptions[0][1] if sheet_descriptions else ""
+            else:
+                sheet_desc = _inner_html(sheet_node)
+                if sheet_desc:
+                    sheet_descriptions.append((1, sheet_desc))
 
         setters: dict[str, str] = {}
         setters_node = node.find("setters")
@@ -531,6 +557,10 @@ class ContentRepository:
             stat_rules=stat_rules,
             spellcasting=spellcasting,
             multiclass=multiclass,
+            sheet_action=sheet_action,
+            sheet_usage=sheet_usage,
+            sheet_alt=sheet_alt,
+            sheet_descriptions=sheet_descriptions,
         )
 
     def get(self, element_id: str) -> Optional[Element]:
@@ -541,6 +571,19 @@ class ContentRepository:
 
     def types(self) -> list[str]:
         return sorted(self.by_type.keys())
+
+    def sources(self) -> list[str]:
+        """Return sorted unique non-empty source names across loaded elements."""
+        return sorted({el.source.strip() for el in self.by_id.values() if el.source and el.source.strip()})
+
+    def source_element_counts(self) -> dict[str, int]:
+        """Return element count per source name."""
+        counts: dict[str, int] = defaultdict(int)
+        for el in self.by_id.values():
+            src = (el.source or "").strip()
+            if src:
+                counts[src] += 1
+        return dict(sorted(counts.items()))
 
     def match_supports(self, element: Element, supports_expr: str) -> bool:
         expr = (supports_expr or "").strip()
@@ -556,20 +599,24 @@ class ContentRepository:
             lambda term: term.lower() in tokens_lower,
         )
 
-    def find_matching(self, element_type: str, supports_expr: str = "") -> list[Element]:
+    def find_matching(
+        self,
+        element_type: str,
+        supports_expr: str = "",
+    ) -> list[Element]:
         key = (element_type, (supports_expr or "").strip())
         cached = self._match_cache.get(key)
-        if cached is not None:
-            return list(cached)
-        candidates = self.by_type.get(element_type, [])
-        if not key[1]:
-            res = tuple(candidates)
-        else:
-            res = tuple(el for el in candidates if self.match_supports(el, key[1]))
-        if len(self._match_cache) > 2048:
-            self._match_cache.clear()
-        self._match_cache[key] = res
-        return list(res)
+        if cached is None:
+            candidates = self.by_type.get(element_type, [])
+            if not key[1]:
+                res = tuple(candidates)
+            else:
+                res = tuple(el for el in candidates if self.match_supports(el, key[1]))
+            if len(self._match_cache) > 2048:
+                self._match_cache.clear()
+            self._match_cache[key] = res
+            cached = res
+        return list(cached)
 
     def available_spell_classes(self) -> list[str]:
         """Return sorted D&D spellcasting class names present across standard + loaded spells."""

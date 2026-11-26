@@ -77,6 +77,7 @@ class CharacterSelectView(QWidget):
     change_folder_requested = Signal()
     refresh_requested = Signal()
     open_github_requested = Signal()
+    open_homebrew_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -129,9 +130,11 @@ class CharacterSelectView(QWidget):
         top_layout.addLayout(title_box)
         top_layout.addStretch()
 
+        self.btn_homebrew = QPushButton("Homebrew Editor")
+        self.btn_homebrew.clicked.connect(self.open_homebrew_requested.emit)
         self.btn_github = QPushButton("Additional Content (GitHub)")
         self.btn_github.clicked.connect(self.open_github_requested.emit)
-        btn_import = QPushButton("Import .dnd5e / .dnd55e / .dndcomp")
+        btn_import = QPushButton("Import .dnd5e / .dnd55e / .dndcomp / .aurorapack")
         btn_import.clicked.connect(self.import_dnd5e_requested.emit)
         btn_new_comp = QPushButton("+ New Companion")
         btn_new_comp.clicked.connect(self.new_companion_requested.emit)
@@ -139,6 +142,7 @@ class CharacterSelectView(QWidget):
         btn_new.setObjectName("PrimaryBtn")
         btn_new.clicked.connect(self.new_character_requested.emit)
 
+        top_layout.addWidget(self.btn_homebrew)
         top_layout.addWidget(self.btn_github)
         top_layout.addWidget(btn_import)
         top_layout.addWidget(btn_new_comp)

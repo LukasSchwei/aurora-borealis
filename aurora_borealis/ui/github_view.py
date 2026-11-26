@@ -8,6 +8,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -49,6 +50,7 @@ class GitHubWorker(QThread):
         url: str = "",
         local_dir: Optional[Path] = None,
         records: Optional[list[IndexRecord]] = None,
+        exclude_third_party: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -57,6 +59,7 @@ class GitHubWorker(QThread):
         self.url = url
         self.local_dir = local_dir
         self.records = records or []
+        self.exclude_third_party = bool(exclude_third_party)
 
     def run(self) -> None:
         try:
@@ -66,7 +69,7 @@ class GitHubWorker(QThread):
                     self.url,
                     self.custom_root,
                     progress_cb=self.log_line.emit,
-                    exclude_third_party=True,
+                    exclude_third_party=self.exclude_third_party,
                 )
                 out.append(rec)
             elif self.mode == "official":
@@ -111,6 +114,7 @@ class GitHubContentView(QWidget):
     back_requested = Signal()
     import_local_folder_requested = Signal()
     show_duplicates_requested = Signal()
+    open_homebrew_requested = Signal()
     content_changed = Signal(list)  # list[dict] installed_indexes
 
     def __init__(self, custom_root: Path, parent=None) -> None:
@@ -147,6 +151,9 @@ class GitHubContentView(QWidget):
         self.btn_dups = QPushButton("Duplicates (0)")
         self.btn_dups.clicked.connect(self.show_duplicates_requested.emit)
 
+        self.btn_homebrew = QPushButton("Homebrew XML Editor")
+        self.btn_homebrew.clicked.connect(self.open_homebrew_requested.emit)
+
         btn_local = QPushButton("Import Local XML Folder")
         btn_local.clicked.connect(self.import_local_folder_requested.emit)
 
@@ -160,6 +167,7 @@ class GitHubContentView(QWidget):
 
         top_layout.addWidget(btn_back)
         top_layout.addLayout(title_col, 1)
+        top_layout.addWidget(self.btn_homebrew)
         top_layout.addWidget(self.btn_dups)
         top_layout.addWidget(btn_local)
         top_layout.addWidget(self.btn_official)
@@ -190,10 +198,16 @@ class GitHubContentView(QWidget):
         self.txt_url = QLineEdit(
             "https://raw.githubusercontent.com/AuroraLegacy/elements/master/core.index"
         )
+        self.chk_exclude_3rd_party = QCheckBox("Exclude 3rd-party bundles")
+        self.chk_exclude_3rd_party.setChecked(False)
+        self.chk_exclude_3rd_party.setToolTip(
+            "When checked, skips third-party index bundles included inside master .index files."
+        )
         self.btn_download = QPushButton("Download && Install")
         self.btn_download.setObjectName("PrimaryBtn")
         self.btn_download.clicked.connect(self._on_download_clicked)
         url_row.addWidget(self.txt_url, 1)
+        url_row.addWidget(self.chk_exclude_3rd_party)
         url_row.addWidget(self.btn_download)
         fc_layout.addLayout(url_row)
 
@@ -321,7 +335,11 @@ class GitHubContentView(QWidget):
     def _on_download_clicked(self) -> None:
         url = self.txt_url.text().strip()
         if url:
-            self._run_worker("single", url=url)
+            self._run_worker(
+                "single",
+                url=url,
+                exclude_third_party=self.chk_exclude_3rd_party.isChecked(),
+            )
 
     def start_official_sync(self) -> None:
         self._run_worker("official")
@@ -367,6 +385,7 @@ class GitHubContentView(QWidget):
         url: str = "",
         local_dir: Optional[Path] = None,
         records: Optional[list[IndexRecord]] = None,
+        exclude_third_party: bool = True,
     ) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
@@ -378,6 +397,7 @@ class GitHubContentView(QWidget):
             url=url,
             local_dir=local_dir,
             records=records,
+            exclude_third_party=exclude_third_party,
             parent=self,
         )
         self._worker.log_line.connect(self.append_log)

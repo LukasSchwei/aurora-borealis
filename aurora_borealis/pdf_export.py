@@ -16,7 +16,7 @@ from PySide6.QtCore import QMarginsF, QRectF, QSizeF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
 
 from .animal_forms import find_animal_form
-from .engine import class_display_summary, effective_selection_slot_count, selection_filled_count
+from .engine import class_display_summary, effective_selection_slot_count, is_equipment_proficient, selection_filled_count
 from .loader import ContentRepository
 from .models import ABILITIES, ABILITY_ABBR, SKILLS, CharacterState, ComputedCharacter
 from .paths import get_templates_dir
@@ -865,6 +865,65 @@ def _overlay_5e_appearance(
             _overlay_pdf_pypdf(filled_pdf, overlay_pdf, output_path)
 
 
+def _compute_weapon_attack_and_damage(
+    wpn,
+    el,
+    computed: ComputedCharacter,
+    repo: ContentRepository,
+) -> tuple[int, str, str]:
+    """Compute (attack_bonus, formatted_damage, short_damage_type) for an inventory weapon."""
+    str_mod = computed.ability_modifiers["strength"]
+    dex_mod = computed.ability_modifiers["dexterity"]
+    props_blob = " ".join(
+        [
+            el.name if el else wpn.name,
+            *(el.supports if el else []),
+            el.setters.get("properties", "") if el else "",
+            el.setters.get("category", "") if el else "",
+        ]
+    ).lower()
+    is_finesse = "finesse" in props_blob
+    is_ranged = "ranged" in props_blob and "melee" not in props_blob
+    if is_finesse:
+        atk_mod = max(str_mod, dex_mod)
+    elif is_ranged:
+        atk_mod = dex_mod
+    else:
+        atk_mod = str_mod
+
+    prof = is_equipment_proficient(el, computed, repo) if el is not None else None
+    pb_add = computed.proficiency_bonus if prof is not False else 0
+    atk_bonus = atk_mod + pb_add + int(wpn.magic_bonus or 0)
+
+    dmg = el.setters.get("damage", "") if el else ""
+    dmg_type = (el.setters.get("damage_type", "") if el else "").lower()
+    short_type = {
+        "piercing": "pierc.",
+        "bludgeoning": "bludg.",
+        "slashing": "slash.",
+    }.get(dmg_type, dmg_type[:6])
+
+    dmg_mod = atk_mod + int(wpn.magic_bonus or 0)
+    if dmg:
+        if dmg_mod > 0:
+            dmg_str = f"{dmg}+{dmg_mod}"
+        elif dmg_mod < 0:
+            dmg_str = f"{dmg}{dmg_mod}"
+        else:
+            dmg_str = dmg
+    else:
+        dmg_str = ""
+    return atk_bonus, dmg_str, short_type
+
+
+def _ordered_weapons(state: CharacterState) -> list:
+    """Return inventory weapons with equipped weapons prioritized first."""
+    weapons = [it for it in state.inventory if it.category == "Weapon"]
+    equipped = [it for it in weapons if it.equipped]
+    unequipped = [it for it in weapons if not it.equipped]
+    return [*equipped, *unequipped]
+
+
 def _build_5e_field_map(
     state: CharacterState,
     computed: ComputedCharacter,
@@ -948,31 +1007,20 @@ def _build_5e_field_map(
         if sk.proficient:
             checked.add(_SKILL_CHECKBOXES[skill_name])
 
-    # Weapons (up to 3 rows)
-    weapons = [it for it in state.inventory if it.category == "Weapon"][:3]
+    # Weapons (up to 3 rows, prioritizing equipped weapons)
+    weapons = _ordered_weapons(state)[:3]
     wpn_slots = [
         ("Wpn Name", "Wpn1 AtkBonus", "Wpn1 Damage"),
         ("Wpn Name 2", "Wpn2 AtkBonus ", "Wpn2 Damage "),
         ("Wpn Name 3", "Wpn3 AtkBonus  ", "Wpn3 Damage "),
     ]
-    str_mod = computed.ability_modifiers["strength"]
-    dex_mod = computed.ability_modifiers["dexterity"]
     for idx, wpn in enumerate(weapons):
         el = repo.get(wpn.element_id)
-        dmg = el.setters.get("damage", "") if el else ""
-        dmg_type = (el.setters.get("damage_type", "") if el else "").lower()
-        short_type = {
-            "piercing": "pierc.",
-            "bludgeoning": "bludg.",
-            "slashing": "slash.",
-        }.get(dmg_type, dmg_type[:6])
-        is_ranged = el and ("ranged" in " ".join(el.supports).lower() or "finesse" in " ".join(el.supports).lower())
-        atk_mod = max(str_mod, dex_mod) if is_ranged else str_mod
+        atk_bonus, dmg_str, short_type = _compute_weapon_attack_and_damage(wpn, el, computed, repo)
         n_key, a_key, d_key = wpn_slots[idx]
         text[n_key] = wpn.name
-        text[a_key] = _fmt_mod(atk_mod + computed.proficiency_bonus + wpn.magic_bonus)
-        dmg_bonus = f"+{wpn.magic_bonus}" if wpn.magic_bonus > 0 else ""
-        text[d_key] = f"{dmg}{dmg_bonus} {short_type}".strip()
+        text[a_key] = _fmt_mod(atk_bonus)
+        text[d_key] = f"{dmg_str} {short_type}".strip()
 
     # Equipment, Proficiencies & Features
     eq_lines = [f"{it.name} x{it.quantity}" if it.quantity > 1 else it.name for it in state.inventory]
@@ -1578,29 +1626,22 @@ def export_55e_overlay_pdf(
                 align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             )
 
-            # Weapons & Damage Cantrips (6 rows)
-            weapons = [it for it in state.inventory if it.category == "Weapon"][:6]
+            # Weapons & Damage Cantrips (6 rows, prioritizing equipped weapons)
+            weapons = _ordered_weapons(state)[:6]
             mastered_set = {w.strip().lower() for w in state.weapon_masteries}
-            str_mod = computed.ability_modifiers["strength"]
-            dex_mod = computed.ability_modifiers["dexterity"]
             for idx, wpn in enumerate(weapons):
                 wy = 204.0 + idx * 19.73
                 el = repo.get(wpn.element_id)
-                dmg = el.setters.get("damage", "") if el else ""
-                is_ranged = el and (
-                    "ranged" in " ".join(el.supports).lower()
-                    or "finesse" in " ".join(el.supports).lower()
-                )
-                atk_mod = max(str_mod, dex_mod) if is_ranged else str_mod
+                atk_bonus, dmg_str, short_type = _compute_weapon_attack_and_damage(wpn, el, computed, repo)
                 m_prop = get_weapon_mastery(wpn.name) if wpn.name.lower() in mastered_set else None
                 wpn_label = f"{wpn.name} [{m_prop}]" if m_prop else wpn.name
                 _draw_text(painter, 231.5, wy, 105.6, 15.0, wpn_label, size=7.8 if m_prop else 8.0)
                 _draw_text(
                     painter, 341.5, wy, 43.8, 15.0,
-                    _fmt_mod(atk_mod + computed.proficiency_bonus + wpn.magic_bonus),
+                    _fmt_mod(atk_bonus),
                     size=8.0, bold=True, align=Qt.AlignmentFlag.AlignCenter,
                 )
-                dmg_txt = f"{dmg} +{wpn.magic_bonus}" if (dmg and wpn.magic_bonus > 0) else dmg
+                dmg_txt = f"{dmg_str} {short_type}".strip()
                 _draw_text(painter, 390.0, wy, 74.6, 15.0, dmg_txt, size=7.8)
 
             # Class Features (2 columns), Species Traits, Feats (plus 5.5e notes & animal forms)

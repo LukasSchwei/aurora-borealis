@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -30,9 +31,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSpinBox,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..animal_forms import (
@@ -40,9 +43,13 @@ from ..animal_forms import (
     parse_cr_label,
 )
 from ..engine import is_equipment_proficient, parse_weight_lb
-from ..models import ABILITIES, ABILITY_ABBR, CharacterState, ComputedCharacter, Element
+from ..equipment import (
+    build_starting_equipment,
+    get_character_containers,
+    roll_starting_gold,
+)
 from ..loader import ContentRepository
-from ..models import DuplicateEntry, Element, InventoryItem
+from ..models import ABILITIES, ABILITY_ABBR, CharacterState, ComputedCharacter, DuplicateEntry, Element, InventoryItem
 from ..paths import get_os_downloads_dir
 from ..persistence import encode_portrait_file
 from .ui_helpers import ensure_widgets_fit
@@ -737,3 +744,356 @@ class CustomAnimalFormDialog(QDialog):
             actions=actions,
             category=self.cmb_category.currentData() or "Beast",
         )
+
+
+class CustomItemDialog(QDialog):
+    """Create or edit an inventory item with container, weight, charges, and notes (1.C)."""
+
+    def __init__(
+        self,
+        containers: list[dict],
+        initial_item: Optional[InventoryItem] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._initial = initial_item
+        self.setWindowTitle("Edit Inventory Item" if initial_item else "Add Custom Item")
+        self.setMinimumWidth(460)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.txt_name = QLineEdit(initial_item.name if initial_item else "")
+        self.txt_name.setPlaceholderText("e.g. Healing Potion, Rope (Silk, 50 ft), Cloak of Billowing")
+        form.addRow("Item Name:", self.txt_name)
+
+        self.cmb_cat = QComboBox()
+        for cat in ("Item", "Weapon", "Armor", "Magic Item", "Consumable", "Tool", "Treasure"):
+            self.cmb_cat.addItem(cat, cat)
+        if initial_item and initial_item.category:
+            idx = self.cmb_cat.findText(initial_item.category)
+            if idx >= 0:
+                self.cmb_cat.setCurrentIndex(idx)
+            else:
+                self.cmb_cat.addItem(initial_item.category, initial_item.category)
+                self.cmb_cat.setCurrentText(initial_item.category)
+        form.addRow("Category:", self.cmb_cat)
+
+        row_qw = QHBoxLayout()
+        self.spn_qty = QSpinBox()
+        self.spn_qty.setRange(1, 9999)
+        self.spn_qty.setValue(initial_item.quantity if initial_item else 1)
+        self.spn_weight = QDoubleSpinBox()
+        self.spn_weight.setRange(0.0, 10000.0)
+        self.spn_weight.setDecimals(2)
+        self.spn_weight.setSuffix(" lb")
+        self.spn_weight.setValue(initial_item.weight if initial_item else 1.0)
+        row_qw.addWidget(QLabel("Qty:"))
+        row_qw.addWidget(self.spn_qty)
+        row_qw.addWidget(QLabel("Unit Weight:"))
+        row_qw.addWidget(self.spn_weight)
+        form.addRow("Quantity / Weight:", row_qw)
+
+        self.cmb_container = QComboBox()
+        for c in containers:
+            cname = str(c.get("name") or "").strip()
+            if cname:
+                self.cmb_container.addItem(cname, cname)
+        if initial_item and initial_item.container:
+            if self.cmb_container.findText(initial_item.container) < 0:
+                self.cmb_container.addItem(initial_item.container, initial_item.container)
+            self.cmb_container.setCurrentText(initial_item.container)
+        form.addRow("Container:", self.cmb_container)
+
+        self.chk_ignore_weight = QCheckBox("Ignore item weight (e.g. stored elsewhere / extradimensional)")
+        self.chk_ignore_weight.setChecked(bool(initial_item.ignore_weight) if initial_item else False)
+        form.addRow(self.chk_ignore_weight)
+
+        row_mag = QHBoxLayout()
+        self.spn_bonus = QSpinBox()
+        self.spn_bonus.setRange(0, 5)
+        self.spn_bonus.setPrefix("+")
+        self.spn_bonus.setValue(initial_item.magic_bonus if initial_item else 0)
+        self.txt_enchant = QLineEdit(initial_item.enchantment if initial_item else "")
+        self.txt_enchant.setPlaceholderText("Optional enchantment / property")
+        row_mag.addWidget(self.spn_bonus)
+        row_mag.addWidget(self.txt_enchant, 1)
+        form.addRow("Magic Bonus:", row_mag)
+
+        row_chg = QHBoxLayout()
+        self.spn_charges = QSpinBox()
+        self.spn_charges.setRange(0, 999)
+        self.spn_charges.setValue(initial_item.charges if initial_item else 0)
+        self.spn_max_charges = QSpinBox()
+        self.spn_max_charges.setRange(0, 999)
+        self.spn_max_charges.setValue(initial_item.max_charges if initial_item else 0)
+        row_chg.addWidget(QLabel("Current:"))
+        row_chg.addWidget(self.spn_charges)
+        row_chg.addWidget(QLabel("Max:"))
+        row_chg.addWidget(self.spn_max_charges)
+        form.addRow("Charges:", row_chg)
+
+        self.txt_notes = QPlainTextEdit(initial_item.notes if initial_item else "")
+        self.txt_notes.setMaximumHeight(76)
+        self.txt_notes.setPlaceholderText("Item notes, activation conditions, etc.")
+        form.addRow("Notes:", self.txt_notes)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        ensure_widgets_fit(self)
+
+    def _on_accept(self) -> None:
+        if not self.txt_name.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter an item name.")
+            return
+        self.accept()
+
+    def build_item(self) -> InventoryItem:
+        base = self._initial
+        return InventoryItem(
+            element_id=base.element_id if base else "",
+            name=self.txt_name.text().strip(),
+            quantity=self.spn_qty.value(),
+            equipped=base.equipped if base else False,
+            weight=float(self.spn_weight.value()),
+            category=self.cmb_cat.currentText(),
+            magic_bonus=self.spn_bonus.value(),
+            enchantment=self.txt_enchant.text().strip(),
+            attuned=base.attuned if base else False,
+            container=self.cmb_container.currentText() or "On Person",
+            ignore_weight=self.chk_ignore_weight.isChecked(),
+            notes=self.txt_notes.toPlainText().strip(),
+            charges=self.spn_charges.value(),
+            max_charges=self.spn_max_charges.value(),
+            custom=base.custom if base else True,
+        )
+
+
+class ManageContainersDialog(QDialog):
+    """Manage storage containers (Backpack, Bag of Holding, Mount, Camp Storage) (1.C)."""
+
+    def __init__(self, state: CharacterState, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manage Storage Containers")
+        self.setMinimumSize(500, 360)
+        self._containers = [dict(c) for c in get_character_containers(state)]
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Configure containers and whether their contents count toward carried weight:"))
+
+        self.tbl = QTableWidget(0, 3)
+        self.tbl.setHorizontalHeaderLabels(["Container Name", "Weightless", "Notes"])
+        self.tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.tbl.setColumnWidth(1, 90)
+        self.tbl.verticalHeader().setVisible(False)
+        layout.addWidget(self.tbl, 1)
+
+        add_row = QHBoxLayout()
+        self.txt_new_name = QLineEdit()
+        self.txt_new_name.setPlaceholderText("New container name (e.g. Cart, Saddlebags, Camp Chest)…")
+        self.chk_new_weightless = QCheckBox("Ignore Weight")
+        btn_add = QPushButton("+ Add")
+        btn_add.clicked.connect(self._add_container)
+        btn_rem = QPushButton("Remove Selected")
+        btn_rem.clicked.connect(self._remove_selected)
+        add_row.addWidget(self.txt_new_name, 1)
+        add_row.addWidget(self.chk_new_weightless)
+        add_row.addWidget(btn_add)
+        add_row.addWidget(btn_rem)
+        layout.addLayout(add_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh_table()
+        ensure_widgets_fit(self)
+
+    def _refresh_table(self) -> None:
+        self.tbl.setRowCount(len(self._containers))
+        vh = self.tbl.verticalHeader()
+        vh.setMinimumSectionSize(36)
+        vh.setDefaultSectionSize(36)
+        for r, c in enumerate(self._containers):
+            self.tbl.setItem(r, 0, QTableWidgetItem(str(c.get("name") or "")))
+            chk = QCheckBox()
+            chk.setChecked(bool(c.get("ignore_weight", False)))
+            chk.stateChanged.connect(lambda st, idx=r: self._toggle_weightless(idx, st))
+            self.tbl.setCellWidget(r, 1, chk)
+            self.tbl.setItem(r, 2, QTableWidgetItem(str(c.get("notes") or "")))
+            self.tbl.setRowHeight(r, 36)
+
+    def _toggle_weightless(self, idx: int, st: int) -> None:
+        if 0 <= idx < len(self._containers):
+            self._containers[idx]["ignore_weight"] = bool(st)
+
+    def _add_container(self) -> None:
+        name = self.txt_new_name.text().strip()
+        if not name:
+            return
+        if any(str(c.get("name") or "").lower() == name.lower() for c in self._containers):
+            return
+        self._containers.append(
+            {
+                "name": name,
+                "ignore_weight": self.chk_new_weightless.isChecked(),
+                "notes": "Custom container",
+            }
+        )
+        self.txt_new_name.clear()
+        self._refresh_table()
+
+    def _remove_selected(self) -> None:
+        r = self.tbl.currentRow()
+        if 0 <= r < len(self._containers):
+            if str(self._containers[r].get("name") or "").lower() == "on person":
+                return
+            self._containers.pop(r)
+            self._refresh_table()
+
+    def containers(self) -> list[dict]:
+        out: list[dict] = []
+        for r in range(self.tbl.rowCount()):
+            name_it = self.tbl.item(r, 0)
+            notes_it = self.tbl.item(r, 2)
+            cname = (name_it.text() if name_it else "").strip()
+            if not cname:
+                continue
+            out.append(
+                {
+                    "name": cname,
+                    "ignore_weight": bool(self._containers[r].get("ignore_weight", False)),
+                    "notes": (notes_it.text() if notes_it else "").strip(),
+                }
+            )
+        return out
+
+
+class StartingEquipmentDialog(QDialog):
+    """Apply standard Class & Background starting equipment or rolled starting gold (1.C)."""
+
+    def __init__(self, state: CharacterState, repo: ContentRepository, parent=None) -> None:
+        super().__init__(parent)
+        self.state = state
+        self.repo = repo
+        self.setWindowTitle("Starting Equipment && Wealth")
+        self.setMinimumSize(480, 380)
+
+        cls_el = repo.get(state.class_id)
+        bg_el = repo.get(state.background_id)
+        self._class_name = cls_el.name if cls_el else ""
+        self._bg_name = bg_el.name if bg_el else ""
+        self._items, self._bg_gold = build_starting_equipment(self._class_name, self._bg_name, repo)
+        self._rolled_gold = roll_starting_gold(self._class_name)
+
+        layout = QVBoxLayout(self)
+        hdr = QLabel(
+            f"<b>Class:</b> {self._class_name or 'None'}  •  <b>Background:</b> {self._bg_name or 'None'}"
+        )
+        layout.addWidget(hdr)
+
+        self.rad_pkg = QRadioButton(f"Standard Equipment Package ({len(self._items)} items + {self._bg_gold} gp)")
+        self.rad_gold = QRadioButton(f"Starting Gold Only ({self._rolled_gold} gp)")
+        self.rad_pkg.setChecked(True)
+        layout.addWidget(self.rad_pkg)
+
+        self.lst_preview = QListWidget()
+        for it in self._items:
+            self.lst_preview.addItem(f"{it.name} ×{it.quantity} ({it.container})")
+        layout.addWidget(self.lst_preview, 1)
+
+        gold_row = QHBoxLayout()
+        gold_row.addWidget(self.rad_gold, 1)
+        btn_reroll = QPushButton("Re-roll Gold")
+        btn_reroll.clicked.connect(self._reroll_gold)
+        gold_row.addWidget(btn_reroll)
+        layout.addLayout(gold_row)
+
+        self.chk_replace = QCheckBox("Replace existing inventory items (uncheck to append)")
+        self.chk_replace.setChecked(False)
+        layout.addWidget(self.chk_replace)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Apply to Character")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        ensure_widgets_fit(self)
+
+    def _reroll_gold(self) -> None:
+        self._rolled_gold = roll_starting_gold(self._class_name)
+        self.rad_gold.setText(f"Starting Gold Only ({self._rolled_gold} gp)")
+
+    def selected_result(self) -> tuple[list[InventoryItem], int, bool]:
+        if self.rad_gold.isChecked():
+            return [], self._rolled_gold, self.chk_replace.isChecked()
+        return list(self._items), self._bg_gold, self.chk_replace.isChecked()
+
+
+class SpellSwapDialog(QDialog):
+    """Swap an existing known spell for another eligible spell of up to the same caster level (2.4)."""
+
+    def __init__(
+        self,
+        old_spell: Element,
+        candidates: list[Element],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._candidates = candidates
+        self.setWindowTitle(f"Swap Spell — {old_spell.name}")
+        self.setMinimumSize(460, 420)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"Replace <b>{old_spell.name}</b> (Level {old_spell.setters.get('level', '0')}) with:"
+            )
+        )
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("Filter replacement spells…")
+        self.txt_search.textChanged.connect(self._refresh)
+        layout.addWidget(self.txt_search)
+
+        self.lst = QListWidget()
+        self.lst.itemDoubleClicked.connect(lambda _it: self.accept())
+        layout.addWidget(self.lst, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Swap Spell")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh()
+        ensure_widgets_fit(self)
+
+    def _refresh(self) -> None:
+        q = self.txt_search.text().strip().lower()
+        self.lst.clear()
+        for sp in self._candidates:
+            if q and q not in sp.name.lower():
+                continue
+            lvl = sp.setters.get("level", "0")
+            lbl = f"{sp.name} ({'Cantrip' if lvl == '0' else f'Lv {lvl}'})"
+            it = QListWidgetItem(lbl)
+            it.setData(Qt.ItemDataRole.UserRole, sp.id)
+            self.lst.addItem(it)
+        if self.lst.count() > 0:
+            self.lst.setCurrentRow(0)
+
+    def selected_spell_id(self) -> str:
+        cur = self.lst.currentItem()
+        return str(cur.data(Qt.ItemDataRole.UserRole) or "") if cur else ""

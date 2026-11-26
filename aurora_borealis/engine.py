@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 from typing import Optional
 
+from .equipment import is_container_weightless
 from .loader import ContentRepository, evaluate_boolean_expr
 from .models import (
     ABILITIES,
@@ -20,6 +21,7 @@ from .models import (
     Element,
     SavingThrowValue,
     SelectRule,
+    SheetAction,
     SkillValue,
     SpellcastingInfo,
     SpellcastingSummary,
@@ -818,6 +820,39 @@ def is_spell_castable_for_character(
     return False
 
 
+_SHEET_PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
+
+
+def resolve_sheet_placeholders(
+    text: str,
+    stats: dict[str, float],
+    computed_map: Optional[dict[str, str]] = None,
+) -> str:
+    """Resolve Aurora {{...}} placeholders in sheet descriptions using computed stats."""
+    if not text or "{{" not in text:
+        return text
+    cmap = computed_map or {}
+
+    def _repl(match: re.Match[str]) -> str:
+        raw_key = match.group(1).strip()
+        signed = raw_key.startswith("+")
+        key = raw_key[1:].strip().lower() if signed else raw_key.lower()
+        if key in cmap:
+            val_str = cmap[key]
+            if signed and val_str and not val_str.startswith(("+", "-")):
+                return f"+{val_str}"
+            return val_str
+        if key in stats:
+            num = stats[key]
+            if abs(num - round(num)) < 1e-6:
+                iv = int(round(num))
+                return f"+{iv}" if (signed and iv >= 0) else str(iv)
+            return f"+{num:g}" if (signed and num >= 0) else f"{num:g}"
+        return match.group(0)
+
+    return _SHEET_PLACEHOLDER_RE.sub(_repl, text)
+
+
 class RulesEngine:
     """Evaluates CharacterState against ContentRepository."""
 
@@ -849,8 +884,13 @@ class RulesEngine:
                 equipped_armor_types.add(armor_kind)
                 tags.add(f"[armor:{armor_kind}]")
                 tags.add("[armor:any]")
-            if el.type == "Weapon":
+            if el.type == "Weapon" or item.category == "Weapon":
                 tags.add("[weapon:any]")
+                w_blob = " ".join([el.name, *el.supports, el.setters.get("category", "")]).lower()
+                if "ranged" in w_blob or "bow" in w_blob or "crossbow" in w_blob or "sling" in w_blob:
+                    tags.add("[weapon:ranged]")
+                else:
+                    tags.add("[weapon:melee]")
 
         if not equipped_armor_types:
             tags.add("[armor:none]")
@@ -1237,6 +1277,7 @@ class RulesEngine:
                         continue
 
                 key = self.selection_key(source_id, sel.type, sel.name, sel.level, idx)
+                options: list[tuple[str, str]] = []
                 if key not in seen_select_keys:
                     seen_select_keys.add(key)
                     if sel.type == "List":
@@ -1269,7 +1310,26 @@ class RulesEngine:
                             options=options,
                         )
                     )
+                else:
+                    existing_sel = next((a for a in active_selections if a.key == key), None)
+                    if existing_sel is not None:
+                        options = existing_sel.options
                 chosen = state.selections.get(key, [])
+                if not chosen and sel.default and sel.type != "List":
+                    def_raw = sel.default.strip()
+                    def_low = def_raw.lower()
+                    def_match = next(
+                        (
+                            oid
+                            for oid, oname in options
+                            if oid == def_raw or oid.lower() == def_low or oname.strip().lower() == def_low
+                        ),
+                        "",
+                    )
+                    if not def_match and self.repo.get(def_raw) is not None:
+                        def_match = def_raw
+                    if def_match:
+                        chosen = [def_match]
                 for slot_idx, cid in enumerate(chosen[: sel.number]):
                     if not cid or sel.type == "List":
                         continue
@@ -1549,6 +1609,14 @@ class RulesEngine:
                         val = self._eval_stat_value(sr.value, stats, eff_level)
                         if val is None:
                             continue
+                        if sr.minimum:
+                            min_v = self._eval_stat_value(sr.minimum, stats, eff_level)
+                            if min_v is not None:
+                                val = max(val, min_v)
+                        if sr.maximum:
+                            max_v = self._eval_stat_value(sr.maximum, stats, eff_level)
+                            if max_v is not None:
+                                val = min(val, max_v)
 
                         sname = sr.name.lower()
                         if sr.bonus:
@@ -1592,6 +1660,7 @@ class RulesEngine:
                 bonus_val = new_stats.get(ab, 0.0)
                 tot = base_val + bonus_val
                 new_stats[f"{ab}:total"] = tot
+                new_stats[f"{ab}:score"] = tot
                 new_stats[f"{ab}:modifier"] = float(ability_modifier(int(tot)))
 
             if new_stats == stats:
@@ -1618,6 +1687,10 @@ class RulesEngine:
             return float(math.ceil(level / 2))
         if sl == "proficiency":
             return float(2 + (level - 1) // 4)
+        if sl == "proficiency:half":
+            return float((2 + (level - 1) // 4) // 2)
+        if sl == "proficiency:half:up":
+            return float(math.ceil((2 + (level - 1) // 4) / 2))
         if sl in stats:
             return float(stats[sl])
         return None
@@ -1770,8 +1843,19 @@ class RulesEngine:
         # Armor Class
         armor_class = self._compute_ac(state, granted_ids, ability_modifiers, stats)
 
-        # Initiative & Speed (including 5.5e Alert Origin Feat & Exhaustion)
-        init_bonus = int(round(stats.get("initiative", 0.0)))
+        # Initiative & Speed (including 5.5e Alert Origin Feat, Jack of All Trades & Exhaustion)
+        granted_names_lower = {e.name.strip().lower() for e in elements}
+        has_jack_of_all_trades = (
+            "ID_WOTC_PHB_CLASS_FEATURE_BARD_JACK_OF_ALL_TRADES" in granted_ids
+            or "jack of all trades" in granted_names_lower
+        )
+        has_remarkable_athlete = "remarkable athlete" in granted_names_lower
+
+        init_bonus = int(round(stats.get("initiative", 0.0) + stats.get("initiative:misc", 0.0)))
+        if has_jack_of_all_trades and "initiative:proficiency" not in stats:
+            init_bonus += proficiency_bonus // 2
+        elif has_remarkable_athlete and "initiative:proficiency" not in stats:
+            init_bonus += math.ceil(proficiency_bonus / 2)
         if state.ruleset == "5.5e":
             origin_chosen = state.selections.get(
                 self.selection_key("5.5e::Origin", "Feat", "Origin Feat (5.5e)", 1, 0), []
@@ -1788,19 +1872,24 @@ class RulesEngine:
                     max_hp = max(1, max_hp + 2 * total_level)
 
         initiative = ability_modifiers["dexterity"] + init_bonus
-        speed = int(round(stats.get("innate speed", 0.0) or stats.get("speed", 0.0) or 30))
+        base_walk = int(round(stats.get("innate speed", 0.0) or stats.get("speed", 0.0) or 30))
+        base_walk += int(round(stats.get("speed:misc", 0.0)))
+        speed = max(0, base_walk)
         exhaustion_d20_penalty = 0
         if state.ruleset == "5.5e" and state.exhaustion_level > 0:
             d20_pen, spd_pen = exhaustion_55e_penalty(state.exhaustion_level)
             exhaustion_d20_penalty = d20_pen
             speed = max(0, speed + spd_pen)
 
-        # Saving Throws
+        # Saving Throws (including XML misc bonuses such as Aura of Protection / Cloak of Protection)
         ov_profs = state.has_override("override_proficiencies")
         manual_saves = {s.lower() for s in state.manual_save_profs} if ov_profs else set()
         manual_skills = {s.lower() for s in state.manual_skill_profs} if ov_profs else set()
         manual_exp = {s.lower() for s in state.manual_skill_expertise} if ov_profs else set()
 
+        global_save_misc = int(
+            round(stats.get("saving throws:misc", 0.0) + stats.get("all:save:misc", 0.0))
+        )
         saving_throws: dict[str, SavingThrowValue] = {}
         for ab in ABILITIES:
             save_id = f"ID_PROFICIENCY_SAVINGTHROW_{ab.upper()}"
@@ -1812,10 +1901,17 @@ class RulesEngine:
                     for e in elements
                 )
             )
-            bonus = ability_modifiers[ab] + (proficiency_bonus if prof else 0) + exhaustion_d20_penalty
+            ab_save_misc = int(round(stats.get(f"{ab}:save:misc", 0.0)))
+            bonus = (
+                ability_modifiers[ab]
+                + (proficiency_bonus if prof else 0)
+                + global_save_misc
+                + ab_save_misc
+                + exhaustion_d20_penalty
+            )
             saving_throws[ab] = SavingThrowValue(ability=ab, bonus=bonus, proficient=prof)
 
-        # Skills (including 5.5e Divine/Primal Order skill bonuses)
+        # Skills (including 5.5e Divine/Primal Order, Jack of All Trades, Remarkable Athlete, XML misc)
         wis_order_bonus = max(1, ability_modifiers["wisdom"])
         skill_extra: dict[str, int] = {}
         if state.ruleset == "5.5e":
@@ -1827,6 +1923,7 @@ class RulesEngine:
                 skill_extra["Nature"] = skill_extra.get("Nature", 0) + wis_order_bonus
 
         skills: dict[str, SkillValue] = {}
+        global_skill_misc = int(round(stats.get("skills:misc", 0.0)))
         expertise_names = {
             e.name.lower()
             for e in elements
@@ -1851,9 +1948,19 @@ class RulesEngine:
                 )
             )
             mult = 2 if (prof and expertise) else (1 if prof else 0)
+            half_pb_bonus = 0
+            if not prof:
+                if has_jack_of_all_trades:
+                    half_pb_bonus = max(half_pb_bonus, proficiency_bonus // 2)
+                if has_remarkable_athlete and ab in ("strength", "dexterity", "constitution"):
+                    half_pb_bonus = max(half_pb_bonus, math.ceil(proficiency_bonus / 2))
+            sk_misc = int(round(stats.get(f"{sk_lower}:misc", 0.0)))
             bonus = (
                 ability_modifiers[ab]
                 + mult * proficiency_bonus
+                + half_pb_bonus
+                + global_skill_misc
+                + sk_misc
                 + skill_extra.get(skill_name, 0)
                 + exhaustion_d20_penalty
             )
@@ -1865,7 +1972,9 @@ class RulesEngine:
                 expertise=expertise,
             )
 
-        passive_perception = 10 + skills["Perception"].bonus
+        passive_perception = 10 + skills["Perception"].bonus + int(round(stats.get("perception:passive", 0.0)))
+        passive_investigation = 10 + skills["Investigation"].bonus + int(round(stats.get("investigation:passive", 0.0)))
+        passive_insight = 10 + skills["Insight"].bonus + int(round(stats.get("insight:passive", 0.0)))
 
         # Proficiencies & Languages
         prof_set = {
@@ -1893,12 +2002,144 @@ class RulesEngine:
             active_selections,
         )
 
-        # Inventory Weight
-        total_weight = 0.0
+        # Inventory Weight, Carrying Capacity & Encumbrance
+        size_names = [e.name.strip().lower() for e in elements if e.type == "Size"]
+        size_mult = 1.0
+        if any("tiny" in s for s in size_names):
+            size_mult = 0.5
+        elif any("large" in s for s in size_names):
+            size_mult = 2.0
+        elif any("huge" in s for s in size_names):
+            size_mult = 4.0
+        elif any("gargantuan" in s for s in size_names):
+            size_mult = 8.0
+        if any("powerful build" in n or "equine build" in n for n in granted_names_lower):
+            size_mult *= 2.0
+        carrying_capacity = float(ability_totals["strength"]) * 15.0 * size_mult
+
+        carried_weight = 0.0
         for item in state.inventory:
+            if item.ignore_weight or is_container_weightless(item.container, state):
+                continue
             el = self.repo.get(item.element_id)
             w = item.weight if item.weight > 0 else parse_weight_lb(el)
-            total_weight += w * max(0, item.quantity)
+            carried_weight += w * max(0, item.quantity)
+        total_weight = carried_weight
+
+        encumbrance_status = "Over Capacity" if carried_weight > carrying_capacity else "Normal"
+
+        # Movement Speeds, Senses, Damage Resistances/Immunities & Condition Immunities
+        speeds: dict[str, int] = {"walk": speed}
+        for move_kind in ("fly", "swim", "climb", "burrow"):
+            mv = int(
+                round(
+                    max(
+                        stats.get(f"innate speed:{move_kind}", 0.0),
+                        stats.get(f"speed:{move_kind}", 0.0),
+                    )
+                )
+            )
+            if mv > 0:
+                speeds[move_kind] = mv
+
+        senses: dict[str, int] = {}
+        for sense_kind in ("darkvision", "blindsight", "tremorsense", "truesight"):
+            sv = int(
+                round(
+                    max(
+                        stats.get(f"{sense_kind}:range", 0.0),
+                        stats.get(sense_kind, 0.0),
+                    )
+                )
+            )
+            if sv > 0:
+                senses[sense_kind] = sv
+        for el in elements:
+            if el.type in ("Vision", "Racial Trait", "Class Feature", "Feat"):
+                el_low = el.name.lower()
+                for sense_kind in ("darkvision", "blindsight", "tremorsense", "truesight"):
+                    if sense_kind in el_low:
+                        m_rng = re.search(r"(\d+)\s*(?:ft|feet)", f"{el.name} {el.sheet_description} {el.description_html}".lower())
+                        rng = int(m_rng.group(1)) if m_rng else (60 if sense_kind == "darkvision" and el.type == "Vision" else 0)
+                        if rng > senses.get(sense_kind, 0):
+                            senses[sense_kind] = rng
+
+        dmg_res: list[str] = []
+        dmg_imm: list[str] = []
+        dmg_vuln: list[str] = []
+        cond_imm: list[str] = []
+        seen_traits: set[tuple[str, str]] = set()
+
+        def _add_trait(bucket: list[str], kind_key: str, label: str) -> None:
+            clean = label.strip()
+            if not clean:
+                return
+            k = (kind_key, clean.lower())
+            if k not in seen_traits:
+                seen_traits.add(k)
+                bucket.append(clean)
+
+        for el in elements:
+            et_l = el.type.lower()
+            eid_u = el.id.upper()
+            ename = el.name.strip()
+            if et_l in ("damage resistance", "resistance") or "RESISTANCE_" in eid_u:
+                _add_trait(dmg_res, "res", re.sub(r"^Damage Resistance\s*\((.+)\)$", r"\1", ename, flags=re.I))
+            elif et_l == "condition" or "CONDITION_IMMUNITY" in eid_u or (et_l == "immunity" and any(c in ename.lower() for c in ("charmed", "frightened", "poisoned", "exhaustion", "paralyzed", "stunned", "blinded", "deafened"))):
+                _add_trait(cond_imm, "cond", ename)
+            elif et_l == "immunity" or "DAMAGE_IMMUNITY" in eid_u or "IMMUNITY_" in eid_u:
+                _add_trait(dmg_imm, "imm", re.sub(r"^Damage Immunity\s*\((.+)\)$", r"\1", ename, flags=re.I))
+            elif "VULNERABILITY_" in eid_u or et_l == "vulnerability":
+                _add_trait(dmg_vuln, "vuln", ename)
+
+        # Resolve {{...}} placeholders & Sheet Actions
+        placeholder_map: dict[str, str] = {
+            "level": str(total_level),
+            "proficiency": str(proficiency_bonus),
+            "proficiency:half": str(proficiency_bonus // 2),
+            "proficiency:half:up": str(math.ceil(proficiency_bonus / 2)),
+            "ac": str(armor_class),
+            "hp": str(max_hp),
+            "speed": str(speed),
+            "initiative": str(initiative),
+            "passive perception": str(passive_perception),
+            "passive investigation": str(passive_investigation),
+            "passive insight": str(passive_insight),
+        }
+        for ab in ABILITIES:
+            placeholder_map[ab] = str(ability_totals[ab])
+            placeholder_map[f"{ab}:total"] = str(ability_totals[ab])
+            placeholder_map[f"{ab}:score"] = str(ability_totals[ab])
+            placeholder_map[f"{ab}:modifier"] = str(ability_modifiers[ab])
+        if spellcasting is not None:
+            placeholder_map["spellcasting:dc"] = str(spellcasting.save_dc)
+            placeholder_map["spellcasting:attack"] = str(spellcasting.attack_bonus)
+
+        resolved_descriptions: dict[str, str] = {}
+        sheet_actions: list[SheetAction] = []
+        for el in elements:
+            owner = element_owners.get(el.id)
+            eff_lvl = owner[1] if owner is not None else total_level
+            raw_sdesc = el.sheet_description
+            if el.sheet_descriptions:
+                eligible_descs = [dhtml for dlvl, dhtml in el.sheet_descriptions if dlvl <= eff_lvl]
+                if eligible_descs:
+                    raw_sdesc = eligible_descs[-1]
+            resolved_sdesc = resolve_sheet_placeholders(raw_sdesc, stats, placeholder_map)
+            if resolved_sdesc:
+                resolved_descriptions[el.id] = resolved_sdesc
+            if el.sheet_action or el.sheet_usage:
+                sheet_actions.append(
+                    SheetAction(
+                        name=el.name,
+                        action=el.sheet_action,
+                        usage=resolve_sheet_placeholders(el.sheet_usage, stats, placeholder_map),
+                        alt=el.sheet_alt,
+                        description=resolved_sdesc or el.description_html,
+                        level=eff_lvl,
+                        source_element_id=el.id,
+                    )
+                )
 
         # 5.5e Weapon Masteries & Rules Notes
         weapon_mastery_limit = compute_weapon_mastery_limit(state, self.repo, elements)
@@ -1972,6 +2213,19 @@ class RulesEngine:
             weapon_mastery_details=weapon_mastery_details,
             ruleset_55e_notes=ruleset_55e_notes,
             exhaustion_d20_penalty=exhaustion_d20_penalty,
+            passive_investigation=passive_investigation,
+            passive_insight=passive_insight,
+            speeds=speeds,
+            senses=senses,
+            damage_resistances=dmg_res,
+            damage_immunities=dmg_imm,
+            damage_vulnerabilities=dmg_vuln,
+            condition_immunities=cond_imm,
+            sheet_actions=sheet_actions,
+            resolved_descriptions=resolved_descriptions,
+            carrying_capacity=round(carrying_capacity, 2),
+            carried_weight=round(carried_weight, 2),
+            encumbrance_status=encumbrance_status,
         )
 
     def _compute_ac(
@@ -2015,6 +2269,7 @@ class RulesEngine:
                 ac = armor_base + min(dex_mod, 2) + armor_magic
             else:
                 ac = armor_base + armor_magic
+            ac += int(round(stats.get("ac:armored:armor", 0.0)))
         else:
             candidates = [10 + dex_mod]
             if "ID_WOTC_PHB_CLASS_FEATURE_BARBARIAN_UNARMORED_DEFENSE" in granted_ids:
@@ -2023,10 +2278,17 @@ class RulesEngine:
                 candidates.append(10 + dex_mod + mods["wisdom"])
             if "ID_WOTC_PHB_ARCHETYPE_FEATURE_DRACONIC_RESILIENCE" in granted_ids:
                 candidates.append(13 + dex_mod)
+            ac_calc = int(round(stats.get("ac:calculation", 0.0)))
+            ac_unarm = int(round(stats.get("ac:unarmored", 0.0)))
+            if ac_calc > 0:
+                candidates.append(ac_calc)
+            if ac_unarm > 0:
+                candidates.append(ac_unarm)
             ac = max(candidates)
 
+        shield_extra = int(round(stats.get("ac:shield", 0.0))) if shield_bonus > 0 else 0
         misc = int(round(stats.get("ac:misc", 0.0) + stats.get("ac:armored:enhancement", 0.0)))
-        return ac + shield_bonus + misc
+        return ac + shield_bonus + shield_extra + misc
 
     def _compute_spellcasting(
         self,

@@ -79,6 +79,21 @@ class StatRule:
     level: int = 1
     requirements: str = ""
     equipped: str = ""
+    inline: bool = False
+    maximum: str = ""
+    minimum: str = ""
+    alt: str = ""
+
+
+@dataclass
+class SheetAction:
+    name: str
+    action: str = ""
+    usage: str = ""
+    alt: str = ""
+    description: str = ""
+    level: int = 1
+    source_element_id: str = ""
 
 
 @dataclass
@@ -117,6 +132,10 @@ class Element:
     stat_rules: list[StatRule] = field(default_factory=list)
     spellcasting: Optional[SpellcastingInfo] = None
     multiclass: Optional[MulticlassInfo] = None
+    sheet_action: str = ""
+    sheet_usage: str = ""
+    sheet_alt: str = ""
+    sheet_descriptions: list[tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -141,6 +160,12 @@ class InventoryItem:
     magic_bonus: int = 0
     enchantment: str = ""
     attuned: bool = False
+    container: str = "On Person"
+    ignore_weight: bool = False
+    notes: str = ""
+    charges: int = 0
+    max_charges: int = 0
+    custom: bool = False
 
 
 @dataclass
@@ -216,6 +241,8 @@ class CharacterState:
     manual_skill_profs: list[str] = field(default_factory=list)
     manual_skill_expertise: list[str] = field(default_factory=list)
     manual_proficiencies: list[str] = field(default_factory=list)
+    containers: list[dict] = field(default_factory=list)
+    build_plan: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.classes:
@@ -408,3 +435,16 @@ class ComputedCharacter:
     weapon_mastery_details: list[dict] = field(default_factory=list)
     ruleset_55e_notes: list[str] = field(default_factory=list)
     exhaustion_d20_penalty: int = 0
+    passive_investigation: int = 10
+    passive_insight: int = 10
+    speeds: dict[str, int] = field(default_factory=dict)
+    senses: dict[str, int] = field(default_factory=dict)
+    damage_resistances: list[str] = field(default_factory=list)
+    damage_immunities: list[str] = field(default_factory=list)
+    damage_vulnerabilities: list[str] = field(default_factory=list)
+    condition_immunities: list[str] = field(default_factory=list)
+    sheet_actions: list[SheetAction] = field(default_factory=list)
+    resolved_descriptions: dict[str, str] = field(default_factory=dict)
+    carrying_capacity: float = 150.0
+    carried_weight: float = 0.0
+    encumbrance_status: str = "Normal"

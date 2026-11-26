@@ -208,13 +208,11 @@ def _parse_rndhp_list(raw: str) -> list[int]:
     return vals
 
 
-def save_dnd5e(
+def serialize_character_xml(
     state: CharacterState,
     repo: ContentRepository,
     computed: ComputedCharacter,
-    path: Path,
-) -> None:
-    path = Path(path)
+) -> bytes:
     fmt = "dnd55e" if state.ruleset == "5.5e" else "dnd5e"
     root = etree.Element("character", version="0.2", preview="false", format=fmt)
 
@@ -351,8 +349,22 @@ def save_dnd5e(
                     value=cid,
                 )
 
-    # Equipment
+    # Equipment & Storage Containers
     equip_node = etree.SubElement(build, "equipment")
+    if state.containers:
+        containers_node = etree.SubElement(equip_node, "containers")
+        for cinfo in state.containers:
+            if not isinstance(cinfo, dict) or not (cinfo.get("name") or "").strip():
+                continue
+            etree.SubElement(
+                containers_node,
+                "container",
+                name=str(cinfo.get("name", "")).strip(),
+                **{
+                    "ignore-weight": "true" if cinfo.get("ignore_weight") else "false",
+                    "notes": str(cinfo.get("notes") or ""),
+                },
+            )
     for item in state.inventory:
         attrs = {
             "identifier": item.element_id,
@@ -368,6 +380,18 @@ def save_dnd5e(
             attrs["enchantment"] = item.enchantment
         if item.attuned:
             attrs["attuned"] = "true"
+        if item.container and item.container != "On Person":
+            attrs["container"] = item.container
+        if item.ignore_weight:
+            attrs["ignore-weight"] = "true"
+        if item.notes:
+            attrs["notes"] = item.notes
+        if item.charges:
+            attrs["charges"] = str(item.charges)
+        if item.max_charges:
+            attrs["max-charges"] = str(item.max_charges)
+        if item.custom:
+            attrs["custom"] = "true"
         etree.SubElement(equip_node, "item", **attrs)
 
     # Magic / Spells
@@ -459,18 +483,55 @@ def save_dnd5e(
         for pr in state.manual_proficiencies:
             etree.SubElement(mp_node, "proficiency").text = pr
 
-    xml_bytes = etree.tostring(root, encoding="utf-8", xml_declaration=True, pretty_print=True)
+    # Level 1-20 Build Plan
+    if state.build_plan:
+        import json
+
+        bp_node = etree.SubElement(build, "build-plan")
+        for entry in state.build_plan:
+            if not isinstance(entry, dict):
+                continue
+            attrs = {
+                "level": str(entry.get("level", 1)),
+                "class-id": str(entry.get("class_id") or ""),
+                "subclass-id": str(entry.get("subclass_id") or ""),
+                "asi-or-feat": str(entry.get("asi_or_feat") or ""),
+                "spells": json.dumps(entry.get("spells") or [], ensure_ascii=False),
+            }
+            en = etree.SubElement(bp_node, "entry", **attrs)
+            en.text = str(entry.get("notes") or "")
+
+    return etree.tostring(root, encoding="utf-8", xml_declaration=True, pretty_print=True)
+
+
+def save_dnd5e(
+    state: CharacterState,
+    repo: ContentRepository,
+    computed: ComputedCharacter,
+    path: Path,
+) -> None:
+    path = Path(path)
+    xml_bytes = serialize_character_xml(state, repo, computed)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(xml_bytes)
 
 
 def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
     path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Character file not found: {path}")
+    return parse_character_xml(path.read_bytes(), repo, source_label=str(path))
+
+
+def parse_character_xml(
+    xml_bytes: bytes,
+    repo: ContentRepository,
+    source_label: str = "<bytes>",
+) -> CharacterState:
     parser = etree.XMLParser(recover=True, remove_comments=True)
-    tree = etree.parse(str(path), parser)
-    root = tree.getroot()
+    root = etree.fromstring(xml_bytes, parser=parser)
     if root is None:
-        raise ValueError(f"Invalid .dnd5e file: {path}")
+        raise ValueError(f"Invalid .dnd5e file: {source_label}")
 
     state = CharacterState()
     build = root.find("build")
@@ -950,6 +1011,30 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
 
     equip_node = build.find("equipment")
     if equip_node is not None:
+        containers_node = equip_node.find("containers")
+        if containers_node is not None:
+            for cnode in containers_node.findall("container"):
+                cname = (cnode.get("name") or "").strip()
+                if cname:
+                    state.containers.append(
+                        {
+                            "name": cname,
+                            "ignore_weight": (cnode.get("ignore-weight") or "false").lower() == "true",
+                            "notes": (cnode.get("notes") or "").strip(),
+                        }
+                    )
+        storage_node = build.find("storage")
+        if storage_node is not None and not state.containers:
+            for loc in storage_node.findall("location"):
+                lname = (loc.get("name") or "").strip()
+                if lname:
+                    state.containers.append(
+                        {
+                            "name": lname,
+                            "ignore_weight": True,
+                            "notes": "Imported legacy storage location",
+                        }
+                    )
         for item in equip_node.findall(".//item"):
             raw_eid = (item.get("identifier") or item.get("id") or "").strip()
             name = (item.get("name") or "").strip()
@@ -994,6 +1079,18 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                 (item.get("attuned") or "").lower() == "true"
                 or (item.get("attunement") or "").lower() == "true"
             )
+            container = (item.get("container") or item.get("stored") or "On Person").strip() or "On Person"
+            ignore_w = (item.get("ignore-weight") or "false").lower() == "true"
+            notes = (item.get("notes") or "").strip()
+            try:
+                charges = int(item.get("charges") or "0")
+            except ValueError:
+                charges = 0
+            try:
+                max_charges = int(item.get("max-charges") or "0")
+            except ValueError:
+                max_charges = 0
+            custom = (item.get("custom") or "false").lower() == "true"
             if eid or name:
                 state.inventory.append(
                     InventoryItem(
@@ -1006,6 +1103,12 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
                         magic_bonus=m_bonus,
                         enchantment=ench,
                         attuned=attuned,
+                        container=container,
+                        ignore_weight=ignore_w,
+                        notes=notes,
+                        charges=charges,
+                        max_charges=max_charges,
+                        custom=custom,
                     )
                 )
 
@@ -1125,5 +1228,30 @@ def load_dnd5e(path: Path, repo: ContentRepository) -> CharacterState:
         state.manual_proficiencies = [
             (n.text or "").strip() for n in mp_node.findall("proficiency") if (n.text or "").strip()
         ]
+
+    bp_node = build.find("build-plan")
+    if bp_node is not None:
+        import json
+
+        for en in bp_node.findall("entry"):
+            lvl_s = (en.get("level") or "1").strip()
+            lvl_i = int(lvl_s) if lvl_s.isdigit() else 1
+            spells_raw = en.get("spells") or "[]"
+            try:
+                spells_list = json.loads(spells_raw)
+                if not isinstance(spells_list, list):
+                    spells_list = []
+            except Exception:
+                spells_list = []
+            state.build_plan.append(
+                {
+                    "level": lvl_i,
+                    "class_id": (en.get("class-id") or "").strip(),
+                    "subclass_id": (en.get("subclass-id") or "").strip(),
+                    "asi_or_feat": (en.get("asi-or-feat") or "").strip(),
+                    "spells": [str(s) for s in spells_list if s],
+                    "notes": (en.text or "").strip(),
+                }
+            )
 
     return state
