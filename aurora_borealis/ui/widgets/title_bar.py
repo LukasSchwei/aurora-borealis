@@ -87,7 +87,7 @@ class _WindowTitleBar(QFrame):
         self.btn_min.setToolTip("Minimize")
         self.btn_min.setIconSize(QSize(14, 14))
         self.btn_min.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.btn_min.setCursor(Qt.CursorShape.ArrowCursor)
+        self.btn_min.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_min.clicked.connect(self._win.showMinimized)
 
         self.btn_max = QPushButton()
@@ -95,7 +95,7 @@ class _WindowTitleBar(QFrame):
         self.btn_max.setToolTip("Maximize / Restore")
         self.btn_max.setIconSize(QSize(14, 14))
         self.btn_max.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.btn_max.setCursor(Qt.CursorShape.ArrowCursor)
+        self.btn_max.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_max.clicked.connect(self._toggle_maximize)
 
         self.btn_close = QPushButton()
@@ -103,7 +103,7 @@ class _WindowTitleBar(QFrame):
         self.btn_close.setToolTip("Close")
         self.btn_close.setIconSize(QSize(14, 14))
         self.btn_close.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.btn_close.setCursor(Qt.CursorShape.ArrowCursor)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close.clicked.connect(self._win.close)
 
         win_btns = QHBoxLayout()

@@ -359,8 +359,8 @@ class MainWindow(
             self.setStyleSheet(get_stylesheet(self.config.theme, clamped))
             if hasattr(self, "title_bar"):
                 self.title_bar.set_scale_value(clamped)
-            self._rescale_fixed_widgets(clamped)
             refresh_spinbox_margins(self, clamped)
+            self._rescale_fixed_widgets(clamped)
             if hasattr(self, "select_view") and hasattr(self.select_view, "set_ui_scale"):
                 if self.screen_stack.currentWidget() is self.select_view:
                     self.select_view.set_ui_scale(clamped)
@@ -433,6 +433,8 @@ class MainWindow(
                 cw = self.tbl_inventory.cellWidget(r, 2)
                 if cw is not None:
                     cw.setMinimumWidth(max(84, round(84 * s)))
+                    cw.ensurePolished()
+                    cw.updateGeometry()
                     inv_h = max(inv_h, cw.sizeHint().height() + 6)
                     col2_w = max(col2_w, cw.sizeHint().width() + 8)
             inv_vh = self.tbl_inventory.verticalHeader()
@@ -446,6 +448,8 @@ class MainWindow(
             for r in range(self.tbl_spells.rowCount()):
                 cw = self.tbl_spells.cellWidget(r, 5)
                 if cw is not None:
+                    cw.ensurePolished()
+                    cw.updateGeometry()
                     sp_h = max(sp_h, cw.sizeHint().height() + 6)
             sp_vh = self.tbl_spells.verticalHeader()
             sp_vh.setMinimumSectionSize(sp_h)
@@ -460,6 +464,10 @@ class MainWindow(
             self.tbl_hp_rolls.setColumnWidth(5, round(72 * s))
             if self.state.hp_mode == "rolled":
                 self._sync_hp_panel()
+        if hasattr(self, "top_bar_scroll"):
+            tb_w = self.top_bar_scroll.widget()
+            tb_h = (tb_w.sizeHint().height() + 4) if tb_w is not None else round(54 * s)
+            self.top_bar_scroll.setFixedHeight(max(50, round(52 * s), tb_h))
         if hasattr(self, "tab_bar_scroll"):
             self.tab_bar_scroll.setFixedHeight(max(44, round(46 * s)))
         refit_buttons(self)
@@ -577,7 +585,14 @@ class MainWindow(
         tb_layout.addWidget(btn_save)
         tb_layout.addWidget(btn_pdf)
         tb_layout.addWidget(btn_gh)
-        root_layout.addWidget(top_bar)
+        self.top_bar_scroll = QScrollArea()
+        self.top_bar_scroll.setWidgetResizable(True)
+        self.top_bar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.top_bar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.top_bar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.top_bar_scroll.setWidget(top_bar)
+        self.top_bar_scroll.setFixedHeight(max(50, top_bar.sizeHint().height() + 4))
+        root_layout.addWidget(self.top_bar_scroll)
 
         # Row 2: Dedicated 10-Tab Clickable Bar
         tab_bar = QFrame()

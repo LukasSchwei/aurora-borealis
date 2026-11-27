@@ -57,6 +57,8 @@ class _CatalogSelectorTab(QWidget):
         hdr = QHBoxLayout()
         self.lbl_current = QLabel(f"Selected {title}: None")
         self.lbl_current.setObjectName("AccentText")
+        self.lbl_current.setWordWrap(True)
+        self.lbl_current.setMinimumWidth(0)
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self._clear_clicked)
         hdr.addWidget(self.lbl_current, 1)

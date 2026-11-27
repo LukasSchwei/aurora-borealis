@@ -20,7 +20,7 @@ from .models import (
     StatRule,
 )
 
-_EXPR_TOKEN_RE = re.compile(r"\s*(\|\||&&|\(|\)|,|!|[^|&(),!]+)")
+_EXPR_TOKEN_RE = re.compile(r"\s*(\|\||\||&&|&|\(|\)|,|!|[^|&(),!]+)")
 
 _CHARACTER_FACING_TYPES = {
     "Race",
@@ -105,7 +105,7 @@ def _compile_boolean_expr(expr: str) -> Any:
 
     def parse_or() -> Any:
         node = parse_and()
-        while peek() == "||":
+        while peek() in ("||", "|"):
             consume()
             rhs = parse_and()
             node = ("OR", node, rhs)
@@ -113,7 +113,7 @@ def _compile_boolean_expr(expr: str) -> Any:
 
     def parse_and() -> Any:
         node = parse_not()
-        while peek() in (",", "&&"):
+        while peek() in (",", "&&", "&"):
             consume()
             rhs = parse_not()
             node = ("AND", node, rhs)
@@ -135,7 +135,7 @@ def _compile_boolean_expr(expr: str) -> Any:
             if peek() == ")":
                 consume()
             return node
-        if tok in (")", ",", "&&", "||"):
+        if tok in (")", ",", "&&", "&", "||", "|"):
             return ("CONST", True)
         consume()
         return ("TERM", tok)

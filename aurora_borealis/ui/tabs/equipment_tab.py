@@ -390,9 +390,11 @@ class EquipmentTabMixin:
                 return _on_qty
 
             qty_spin.valueChanged.connect(make_qty_handler(orig_idx))
+            self.tbl_inventory.setCellWidget(row, 2, qty_spin)
+            qty_spin.ensurePolished()
+            qty_spin.updateGeometry()
             inv_row_h = max(inv_row_h, qty_spin.sizeHint().height() + 6)
             col2_w = max(col2_w, qty_spin.sizeHint().width() + 8)
-            self.tbl_inventory.setCellWidget(row, 2, qty_spin)
 
             chk = QCheckBox()
             chk.setChecked(inv.equipped)

@@ -7,6 +7,7 @@ from typing import Optional
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractScrollArea,
     QAbstractSpinBox,
     QApplication,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTabWidget,
+    QToolButton,
     QWidget,
 )
 
@@ -25,11 +27,13 @@ class _NoWheelScrollFilter(QObject):
     """Prevent hovered QComboBox / QAbstractSpinBox widgets from stealing scroll-wheel events."""
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
-        if event.type() in (QEvent.Type.Polish, QEvent.Type.Show, QEvent.Type.StyleChange):
-            if isinstance(obj, QAbstractSpinBox):
+        if event.type() in (QEvent.Type.Polish, QEvent.Type.Show, QEvent.Type.StyleChange, QEvent.Type.EnabledChange):
+            if isinstance(obj, QAbstractSpinBox) and event.type() != QEvent.Type.EnabledChange:
                 app = QApplication.instance()
                 scale = float(app.property("_aurora_ui_scale") or 1.0) if app is not None else 1.0
                 configure_spinbox_margins(obj, scale)
+            elif isinstance(obj, (QPushButton, QToolButton)):
+                configure_button_cursor(obj)
             return False
 
         if event.type() != QEvent.Type.Wheel or not isinstance(event, QWheelEvent):
@@ -121,7 +125,8 @@ def configure_dropdown_combo(cmb: QComboBox, max_visible: int = 14) -> None:
     if cmb.objectName() == "ScaleStageCombo":
         cmb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     else:
-        cmb.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        cmb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        cmb.setMinimumWidth(0)
     cmb.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     view = cmb.view()
     view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -149,8 +154,16 @@ _FIXED_BUTTON_OBJECT_NAMES = frozenset(
 )
 
 
+def configure_button_cursor(btn: QAbstractButton) -> None:
+    """Use pointing-hand cursor on enabled clickable buttons and arrow cursor when disabled."""
+    target = Qt.CursorShape.PointingHandCursor if btn.isEnabled() else Qt.CursorShape.ArrowCursor
+    if btn.cursor().shape() != target:
+        btn.setCursor(target)
+
+
 def fit_button(btn: QPushButton) -> None:
     """Ensure a QPushButton's minimum width always fits its current label text."""
+    configure_button_cursor(btn)
     if btn.objectName() in _FIXED_BUTTON_OBJECT_NAMES:
         return
     if not btn.text().strip():
@@ -194,6 +207,8 @@ def refit_buttons(root: QWidget) -> None:
     """Lightweight button width and spinbox margin refresh used during zoom stage changes."""
     for btn in root.findChildren(QPushButton):
         fit_button(btn)
+    for tb in root.findChildren(QToolButton):
+        configure_button_cursor(tb)
     app = QApplication.instance()
     scale = float(app.property("_aurora_ui_scale") or 1.0) if app is not None else 1.0
     refresh_spinbox_margins(root, scale)
@@ -203,6 +218,8 @@ def ensure_widgets_fit(root: QWidget) -> None:
     """Size buttons, combos, tabs, and tables to fit their labels without '...' truncation."""
     for btn in root.findChildren(QPushButton):
         fit_button(btn)
+    for tb in root.findChildren(QToolButton):
+        configure_button_cursor(tb)
 
     app = QApplication.instance()
     scale = float(app.property("_aurora_ui_scale") or 1.0) if app is not None else 1.0

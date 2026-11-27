@@ -2263,13 +2263,13 @@ class RulesEngine:
                         armor_magic = max(0, item.magic_bonus)
 
         if armor_base is not None:
+            eff_armor_base = max(armor_base, int(round(stats.get("ac:armored:armor", 0.0))))
             if armor_kind == "light":
-                ac = armor_base + dex_mod + armor_magic
+                ac = eff_armor_base + dex_mod + armor_magic
             elif armor_kind == "medium":
-                ac = armor_base + min(dex_mod, 2) + armor_magic
+                ac = eff_armor_base + min(dex_mod, 2) + armor_magic
             else:
-                ac = armor_base + armor_magic
-            ac += int(round(stats.get("ac:armored:armor", 0.0)))
+                ac = eff_armor_base + armor_magic
         else:
             candidates = [10 + dex_mod]
             if "ID_WOTC_PHB_CLASS_FEATURE_BARBARIAN_UNARMORED_DEFENSE" in granted_ids:
